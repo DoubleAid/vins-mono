@@ -39,6 +39,7 @@ T readParam(ros::NodeHandle &n, std::string name)
     return ans;
 }
 
+// 读取参数
 void readParameters(ros::NodeHandle &n)
 {
     std::string config_file;
@@ -51,13 +52,14 @@ void readParameters(ros::NodeHandle &n)
 
     fsSettings["imu_topic"] >> IMU_TOPIC;
 
-    SOLVER_TIME = fsSettings["max_solver_time"];
-    NUM_ITERATIONS = fsSettings["max_num_iterations"];
-    MIN_PARALLAX = fsSettings["keyframe_parallax"];
-    MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;
+    SOLVER_TIME = fsSettings["max_solver_time"];        // 更新单次优化最大事件
+    NUM_ITERATIONS = fsSettings["max_num_iterations"];  // 更新单次优化最大迭代数
+    MIN_PARALLAX = fsSettings["keyframe_parallax"];     // 最小视差
+    MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;         
 
     std::string OUTPUT_PATH;
     fsSettings["output_path"] >> OUTPUT_PATH;
+    // 轨迹输出路径
     VINS_RESULT_PATH = OUTPUT_PATH + "/vins_result_no_loop.csv";
     std::cout << "result path " << VINS_RESULT_PATH << std::endl;
 
@@ -76,13 +78,18 @@ void readParameters(ros::NodeHandle &n)
     COL = fsSettings["image_width"];
     ROS_INFO("ROW: %f COL: %f ", ROW, COL);
 
-    ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];
+    ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];      // 外参标定模式
+    // 参数取值​​：
+​​    // 0​​：​​固定外参​​，使用配置文件中预设的 extrinsicRotation 和 extrinsicTranslation，不参与优化。
+​​    // 1​​：​​在线优化外参​​，但需要提供初始猜测（从配置文件读取），优化会在初始值附近调整。
+​    // ​2​​：​​完全在线标定外参​​，无需初始值（代码中初始化为单位旋转和零平移）。
+
     if (ESTIMATE_EXTRINSIC == 2)
     {
         ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
-        RIC.push_back(Eigen::Matrix3d::Identity());
-        TIC.push_back(Eigen::Vector3d::Zero());
-        EX_CALIB_RESULT_PATH = OUTPUT_PATH + "/extrinsic_parameter.csv";
+        RIC.push_back(Eigen::Matrix3d::Identity());             // 初始旋转 = 单位矩阵 I（无旋转）
+        TIC.push_back(Eigen::Vector3d::Zero());                 // 初始平移 = 零向量
+        EX_CALIB_RESULT_PATH = OUTPUT_PATH + "/extrinsic_parameter.csv";    // 外参优化结果保存路径
 
     }
     else 
@@ -94,7 +101,7 @@ void readParameters(ros::NodeHandle &n)
         }
         if (ESTIMATE_EXTRINSIC == 0)
             ROS_WARN(" fix extrinsic param ");
-
+        // 读取参数
         cv::Mat cv_R, cv_T;
         fsSettings["extrinsicRotation"] >> cv_R;
         fsSettings["extrinsicTranslation"] >> cv_T;
@@ -111,19 +118,19 @@ void readParameters(ros::NodeHandle &n)
         
     } 
 
-    INIT_DEPTH = 5.0;
-    BIAS_ACC_THRESHOLD = 0.1;
-    BIAS_GYR_THRESHOLD = 0.1;
+    INIT_DEPTH = 5.0;           // 特征点初始深度（单目初始化时使用，单位米）
+    BIAS_ACC_THRESHOLD = 0.1;   // 加速度计偏置异常阈值（单位 m/s²）
+    BIAS_GYR_THRESHOLD = 0.1;   // 陀螺仪偏置异常阈值（单位 rad/s）
 
     TD = fsSettings["td"];
     ESTIMATE_TD = fsSettings["estimate_td"];
-    if (ESTIMATE_TD)
+    if (ESTIMATE_TD)        // 是否在线估计时间偏移（0-不估计，1-估计）
         ROS_INFO_STREAM("Unsynchronized sensors, online estimate time offset, initial td: " << TD);
     else
         ROS_INFO_STREAM("Synchronized sensors, fix time offset: " << TD);
 
     ROLLING_SHUTTER = fsSettings["rolling_shutter"];
-    if (ROLLING_SHUTTER)
+    if (ROLLING_SHUTTER)    // 是否为卷帘快门相机（0-全局快门，1-卷帘快门）
     {
         TR = fsSettings["rolling_shutter_tr"];
         ROS_INFO_STREAM("rolling shutter camera, read out time per line: " << TR);

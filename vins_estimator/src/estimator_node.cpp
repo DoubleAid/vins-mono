@@ -13,10 +13,10 @@
 #include "utility/visualization.h"
 
 
-Estimator estimator;
+Estimator estimator;                                // 估计器
 
 std::condition_variable con;
-double current_time = -1;
+double current_time = -1;                           // -1 表示初始化第一个数据
 queue<sensor_msgs::ImuConstPtr> imu_buf;
 queue<sensor_msgs::PointCloudConstPtr> feature_buf;
 queue<sensor_msgs::PointCloudConstPtr> relo_buf;
@@ -95,6 +95,7 @@ void update()
 
 }
 
+// 获取匹配的图片和IMU
 std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>>
 getMeasurements()
 {
@@ -102,9 +103,11 @@ getMeasurements()
 
     while (true)
     {
+        // 如果 imu 缓存或者 特征缓存为空，就认为已经结束了
         if (imu_buf.empty() || feature_buf.empty())
             return measurements;
 
+        // 已经获取到图片了，但没有获取到IMU的信息
         if (!(imu_buf.back()->header.stamp.toSec() > feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
             //ROS_WARN("wait for imu, only should happen at the beginning");
@@ -112,6 +115,7 @@ getMeasurements()
             return measurements;
         }
 
+        // 已经找不到这个 特征的 IMU帧的时间了，就舍弃掉这个特征
         if (!(imu_buf.front()->header.stamp.toSec() < feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
             ROS_WARN("throw img, only should happen at the beginning");
@@ -127,6 +131,7 @@ getMeasurements()
             IMUs.emplace_back(imu_buf.front());
             imu_buf.pop();
         }
+        // 仍保留这个数据
         IMUs.emplace_back(imu_buf.front());
         if (IMUs.empty())
             ROS_WARN("no imu between two image");
@@ -210,51 +215,62 @@ void process()
 {
     while (true)
     {
+        // 存储测量数据，包含IMU数据队列和图像数据配对的列表。
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
+        // 等待条件变量 con，直到 getMeasurements() 获取到一批 ​​时间对齐的 IMU 和图像数据​​。
         std::unique_lock<std::mutex> lk(m_buf);
         con.wait(lk, [&]
                  {
             return (measurements = getMeasurements()).size() != 0;
                  });
         lk.unlock();
+
         m_estimator.lock();
         for (auto &measurement : measurements)
         {
+            // 获取图片像素数据
             auto img_msg = measurement.second;
             double dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
+            // 遍历 imu
             for (auto &imu_msg : measurement.first)
             {
                 double t = imu_msg->header.stamp.toSec();
+                // 添加 相机和IMU的时间戳偏移值，进行时间同步
                 double img_t = img_msg->header.stamp.toSec() + estimator.td;
                 if (t <= img_t)
                 { 
+                    // IMU的时间还没有到达照片的时间，就直接做 IMU的预积分
+
+                    // 第一个数据
                     if (current_time < 0)
                         current_time = t;
                     double dt = t - current_time;
                     ROS_ASSERT(dt >= 0);
                     current_time = t;
-                    dx = imu_msg->linear_acceleration.x;
+                    dx = imu_msg->linear_acceleration.x;    // 更新IMU的线性加速度
                     dy = imu_msg->linear_acceleration.y;
                     dz = imu_msg->linear_acceleration.z;
-                    rx = imu_msg->angular_velocity.x;
+                    rx = imu_msg->angular_velocity.x;       // 更新IMU的角速度
                     ry = imu_msg->angular_velocity.y;
                     rz = imu_msg->angular_velocity.z;
+                    // 处理 IMU 数据直到图像时间戳
                     estimator.processIMU(dt, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
                     //printf("imu: dt:%f a: %f %f %f w: %f %f %f\n",dt, dx, dy, dz, rx, ry, rz);
 
                 }
                 else
                 {
-                    double dt_1 = img_t - current_time;
-                    double dt_2 = t - img_t;
+                    // 如果 图片的时间 介于 上次IMU和本次IMU之间，就做线性插值获取图片时间IMU的积分值
+                    double dt_1 = img_t - current_time;     // 左边的delta
+                    double dt_2 = t - img_t;                // 右边的delta
                     current_time = img_t;
                     ROS_ASSERT(dt_1 >= 0);
                     ROS_ASSERT(dt_2 >= 0);
                     ROS_ASSERT(dt_1 + dt_2 > 0);
-                    double w1 = dt_2 / (dt_1 + dt_2);
-                    double w2 = dt_1 / (dt_1 + dt_2);
-                    dx = w1 * dx + w2 * imu_msg->linear_acceleration.x;
-                    dy = w1 * dy + w2 * imu_msg->linear_acceleration.y;
+                    double w1 = dt_2 / (dt_1 + dt_2);       // 右边的比例
+                    double w2 = dt_1 / (dt_1 + dt_2);       // 左边的比例
+                    dx = w1 * dx + w2 * imu_msg->linear_acceleration.x;     // 左边乘上一个的加速度，右边乘本次的加速度 计算到图片是的预计份
+                    dy = w1 * dy + w2 * imu_msg->linear_acceleration.y;     
                     dz = w1 * dz + w2 * imu_msg->linear_acceleration.z;
                     rx = w1 * rx + w2 * imu_msg->angular_velocity.x;
                     ry = w1 * ry + w2 * imu_msg->angular_velocity.y;
@@ -263,8 +279,11 @@ void process()
                     //printf("dimu: dt:%f a: %f %f %f w: %f %f %f\n",dt_1, dx, dy, dz, rx, ry, rz);
                 }
             }
+
             // set relocalization frame
+            // 回环检测数据处理​
             sensor_msgs::PointCloudConstPtr relo_msg = NULL;
+            // 获取循环检测的最后一个缓存数据
             while (!relo_buf.empty())
             {
                 relo_msg = relo_buf.front();
@@ -272,6 +291,8 @@ void process()
             }
             if (relo_msg != NULL)
             {
+                // 解析匹配点（特征点对应关系）
+                // 匹配点的列表的列表
                 vector<Vector3d> match_points;
                 double frame_stamp = relo_msg->header.stamp.toSec();
                 for (unsigned int i = 0; i < relo_msg->points.size(); i++)
@@ -282,23 +303,31 @@ void process()
                     u_v_id.z() = relo_msg->points[i].z;
                     match_points.push_back(u_v_id);
                 }
+                // 获取位置信息
                 Vector3d relo_t(relo_msg->channels[0].values[0], relo_msg->channels[0].values[1], relo_msg->channels[0].values[2]);
+                // 读取四元数
                 Quaterniond relo_q(relo_msg->channels[0].values[3], relo_msg->channels[0].values[4], relo_msg->channels[0].values[5], relo_msg->channels[0].values[6]);
+                // 将四元数转换成矩阵
                 Matrix3d relo_r = relo_q.toRotationMatrix();
                 int frame_index;
+                // 获取回环关键帧的索引
                 frame_index = relo_msg->channels[0].values[7];
+                // 设置回环帧
                 estimator.setReloFrame(frame_stamp, frame_index, match_points, relo_t, relo_r);
             }
 
             ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
 
+            // 解析图像特征消息
+            // 将当前帧的视觉特征输入状态估计器，用于：​视觉惯性对齐​​（初始化阶段）和 滑动窗口非线性优化​​（重投影误差 + IMU 预积分约束）。
             TicToc t_s;
             map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
-                int v = img_msg->channels[0].values[i] + 0.5;
-                int feature_id = v / NUM_OF_CAM;
-                int camera_id = v % NUM_OF_CAM;
+                // 解析特征ID和相机ID（编码在 channels[0] 中）
+                int v = img_msg->channels[0].values[i] + 0.5;           // +0.5 用于四舍五入
+                int feature_id = v / NUM_OF_CAM;                        // 特征ID
+                int camera_id = v % NUM_OF_CAM;                         // 相机ID（多相机系统）
                 double x = img_msg->points[i].x;
                 double y = img_msg->points[i].y;
                 double z = img_msg->points[i].z;
@@ -340,24 +369,40 @@ void process()
 
 int main(int argc, char **argv)
 {
+    // 初始化 ros 节点
     ros::init(argc, argv, "vins_estimator");
+    // 创建一个 ​​ROS 节点句柄（NodeHandle）​​，并指定其命名空间为 ​​私有命名空间
     ros::NodeHandle n("~");
+    // 设置日志级别为 Info，屏蔽 Debug 信息
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
-    readParameters(n);
+    // 从 ROS 参数服务器读取配置文件（如相机内参、IMU噪声）
+    readParameters(n);  
+    // 将参数加载到 Estimator 类中（例如设置重力、相机-IMU外参）
     estimator.setParameter();
 #ifdef EIGEN_DONT_PARALLELIZE
     ROS_DEBUG("EIGEN_DONT_PARALLELIZE");
 #endif
     ROS_WARN("waiting for image and imu...");
 
+    // 初始化用于发布话题的 ROS Publisher（如轨迹、位姿、点云等）
     registerPub(n);
 
+    // 订阅 IMU 数据（高频率，2000 为队列长度，使用 TCP 协议且禁用 Nagle 算法降低延迟）
     ros::Subscriber sub_imu = n.subscribe(IMU_TOPIC, 2000, imu_callback, ros::TransportHints().tcpNoDelay());
+    
+    // 订阅特征点数据（来自 feature_tracker 节点提取的特征）
     ros::Subscriber sub_image = n.subscribe("/feature_tracker/feature", 2000, feature_callback);
+    
+    // 订阅重启信号（当特征跟踪失败时，触发系统重置）
     ros::Subscriber sub_restart = n.subscribe("/feature_tracker/restart", 2000, restart_callback);
+
+    // 订阅回环检测的匹配点（用于重定位）
     ros::Subscriber sub_relo_points = n.subscribe("/pose_graph/match_points", 2000, relocalization_callback);
 
+    // 创建线程执行 process() 函数
     std::thread measurement_process{process};
+
+    // ros 运行
     ros::spin();
 
     return 0;

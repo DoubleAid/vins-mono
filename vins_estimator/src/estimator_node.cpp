@@ -321,25 +321,33 @@ void process()
             // 解析图像特征消息
             // 将当前帧的视觉特征输入状态估计器，用于：​视觉惯性对齐​​（初始化阶段）和 滑动窗口非线性优化​​（重投影误差 + IMU 预积分约束）。
             TicToc t_s;
+            // image 最外边是特征的ID，然后后面是 一系列 camera id 和 特征点数据
+            // 也就是同一特征不同相机观测的数据
             map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
                 // 解析特征ID和相机ID（编码在 channels[0] 中）
+                // feature_id 唯一标识一个 ​​物理世界中的特征点​​。即使同一特征点被多个相机观测到，其 feature_id 是相同的。
+                // camera_id 标识观测到特征点的 ​​相机编号​​，用于多相机系统（如双目、多目相机）。
+                // 将 feature_id 和 camera_id 合并为一个整数 v。例如：
+                // 若 NUM_OF_CAM = 2（双目系统），feature_id = 100 的特征点在左相机（camera_id = 0）的编码值为 100 * 2 + 0 = 200。
+                // 解码时，v = 200 对应 feature_id = 200 / 2 = 100，camera_id = 200 % 2 = 0。
                 int v = img_msg->channels[0].values[i] + 0.5;           // +0.5 用于四舍五入
                 int feature_id = v / NUM_OF_CAM;                        // 特征ID
                 int camera_id = v % NUM_OF_CAM;                         // 相机ID（多相机系统）
-                double x = img_msg->points[i].x;
+                double x = img_msg->points[i].x;                        // 获取归一化坐标 [x, y, 1]
                 double y = img_msg->points[i].y;
                 double z = img_msg->points[i].z;
-                double p_u = img_msg->channels[1].values[i];
+                double p_u = img_msg->channels[1].values[i];            // 在像素上投影
                 double p_v = img_msg->channels[2].values[i];
-                double velocity_x = img_msg->channels[3].values[i];
+                double velocity_x = img_msg->channels[3].values[i];     // 光流速度
                 double velocity_y = img_msg->channels[4].values[i];
                 ROS_ASSERT(z == 1);
                 Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
-                xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
-                image[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
+                xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;       // 构建特征点数据 七维向量
+                image[feature_id].emplace_back(camera_id,  xyz_uv_velocity);        // 
             }
+            // 执行视觉惯性紧耦合优化
             estimator.processImage(image, img_msg->header);
 
             double whole_t = t_s.toc();
@@ -347,14 +355,15 @@ void process()
             std_msgs::Header header = img_msg->header;
             header.frame_id = "world";
 
-            pubOdometry(estimator, header);
-            pubKeyPoses(estimator, header);
-            pubCameraPose(estimator, header);
-            pubPointCloud(estimator, header);
-            pubTF(estimator, header);
-            pubKeyframe(estimator);
+            // 发布估计结果
+            pubOdometry(estimator, header);                             // 发布里程计位姿
+            pubKeyPoses(estimator, header);                             // 发布关键帧位姿
+            pubCameraPose(estimator, header);                           // 发布相机位姿 IMU坐标系到Camera位姿
+            pubPointCloud(estimator, header);                           // 发布三维地图点
+            pubTF(estimator, header);                                   // TF 变换，用于Rviz
+            pubKeyframe(estimator);                                     // 关键帧数据，用于回环检测和建图
             if (relo_msg != NULL)
-                pubRelocalization(estimator);
+                pubRelocalization(estimator);                           // 发布回环检测结果
             //ROS_ERROR("end: %f, at %f", img_msg->header.stamp.toSec(), ros::Time::now().toSec());
         }
         m_estimator.unlock();

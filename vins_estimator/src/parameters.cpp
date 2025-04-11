@@ -80,9 +80,9 @@ void readParameters(ros::NodeHandle &n)
 
     ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];      // 外参标定模式
     // 参数取值​​：
-​​    // 0​​：​​固定外参​​，使用配置文件中预设的 extrinsicRotation 和 extrinsicTranslation，不参与优化。
-​​    // 1​​：​​在线优化外参​​，但需要提供初始猜测（从配置文件读取），优化会在初始值附近调整。
-​    // ​2​​：​​完全在线标定外参​​，无需初始值（代码中初始化为单位旋转和零平移）。
+    // 0​​：​​固定外参​​，使用配置文件中预设的 extrinsicRotation 和 extrinsicTranslation，不参与优化。
+    // 1​​：​​在线优化外参​​，但需要提供初始猜测（从配置文件读取），优化会在初始值附近调整。
+    // ​2​​：​​完全在线标定外参​​，无需初始值（代码中初始化为单位旋转和零平移）。
 
     if (ESTIMATE_EXTRINSIC == 2)
     {

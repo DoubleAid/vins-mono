@@ -5,7 +5,7 @@ int FeatureTracker::n_id = 0;
 bool inBorder(const cv::Point2f &pt)
 {
     const int BORDER_SIZE = 1;
-    int img_x = cvRound(pt.x);
+    int img_x = cvRound(pt.x);  // cvRound 是 OpenCV 库中的一个函数，用于将一个浮点数四舍五入为最接近的整数。
     int img_y = cvRound(pt.y);
     return BORDER_SIZE <= img_x && img_x < COL - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < ROW - BORDER_SIZE;
 }

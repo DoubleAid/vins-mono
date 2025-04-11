@@ -20,6 +20,8 @@ using namespace std;
 using namespace camodocal;
 using namespace Eigen;
 
+// 判断一个特征点是不是在图像边界
+// 用于过滤掉位于图像边缘之外的特征点，避免越界访问。
 bool inBorder(const cv::Point2f &pt);
 
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status);

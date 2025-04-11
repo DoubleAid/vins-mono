@@ -18,6 +18,7 @@ queue<sensor_msgs::ImageConstPtr> img_buf;
 ros::Publisher pub_img,pub_match;
 ros::Publisher pub_restart;
 
+// 特征追踪器
 FeatureTracker trackerData[NUM_OF_CAM];
 double first_image_time;
 int pub_count = 1;
@@ -25,16 +26,21 @@ bool first_image_flag = true;
 double last_image_time = 0;
 bool init_pub = 0;
 
+// 传入图片时的处理函数
+// 特征跟踪模块的核心部分，处理图像数据，进行特征提取和跟踪，并发布结果。
 void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 {
+    // 首帧初始化
     if(first_image_flag)
     {
         first_image_flag = false;
+        // 更新第一帧和最后一帧的时间
         first_image_time = img_msg->header.stamp.toSec();
         last_image_time = img_msg->header.stamp.toSec();
         return;
     }
     // detect unstable camera stream
+    // 检测图像流不连续（间隔>1秒或时间戳回退）
     if (img_msg->header.stamp.toSec() - last_image_time > 1.0 || img_msg->header.stamp.toSec() < last_image_time)
     {
         ROS_WARN("image discontinue! reset the feature tracker!");
@@ -43,15 +49,20 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         pub_count = 1;
         std_msgs::Bool restart_flag;
         restart_flag.data = true;
+        // 发布重启信号
         pub_restart.publish(restart_flag);
         return;
     }
+    // 更新最后时间戳
     last_image_time = img_msg->header.stamp.toSec();
+    
     // frequency control
+    // 计算实际频率，控制发布频率不超过设定值 FREQ，每秒钟不超过100
     if (round(1.0 * pub_count / (img_msg->header.stamp.toSec() - first_image_time)) <= FREQ)
     {
         PUB_THIS_FRAME = true;
         // reset the frequency control
+        // 每1秒重置频率计数器
         if (abs(1.0 * pub_count / (img_msg->header.stamp.toSec() - first_image_time) - FREQ) < 0.01 * FREQ)
         {
             first_image_time = img_msg->header.stamp.toSec();
@@ -61,9 +72,11 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
     else
         PUB_THIS_FRAME = false;
 
+    // 将 ROS 图像消息转换为 OpenCV 的 cv::Mat 格式，确保为单通道灰度图（MONO8）。
     cv_bridge::CvImageConstPtr ptr;
-    if (img_msg->encoding == "8UC1")
+    if (img_msg->encoding == "8UC1")    // 处理 8UC1 格式（如某些仿真数据）
     {
+        // 复制头信息和数据
         sensor_msgs::Image img;
         img.header = img_msg->header;
         img.height = img_msg->height;
@@ -77,29 +90,42 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
     else
         ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
 
-    cv::Mat show_img = ptr->image;
+    cv::Mat show_img = ptr->image;      // 用于可视化的图像副本
+
     TicToc t_r;
+    // 多相机特征跟踪​
+    ​​// 图像分块​​：若为多相机（如双目），从完整图像中提取对应相机的行区域（rowRange）。
+​​    // 直方图均衡化​​：当 EQUALIZE=true 时，对图像进行自适应直方图均衡化（CLAHE），增强特征对比度。
+​    // ​特征跟踪​​：调用 trackerData[i].readImage() 执行核心跟踪逻辑（光流法 + 特征检测）。
+​    // ​去畸变可视化​​：调试时显示去畸变后的图像。
+
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         ROS_DEBUG("processing camera %d", i);
+        // 单目或非立体跟踪模式
         if (i != 1 || !STEREO_TRACK)
+            // 读取第i个相机的图片
             trackerData[i].readImage(ptr->image.rowRange(ROW * i, ROW * (i + 1)), img_msg->header.stamp.toSec());
         else
-        {
-            if (EQUALIZE)
+        {   
+            // 立体跟踪模式（仅第二相机）
+             // 直方图均衡化（提升低对比度场景）
+            if (EQUALIZE)   // 均衡化，在不明显增加噪音的情况下，增强图片的对比度
             {
                 cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
                 clahe->apply(ptr->image.rowRange(ROW * i, ROW * (i + 1)), trackerData[i].cur_img);
             }
             else
-                trackerData[i].cur_img = ptr->image.rowRange(ROW * i, ROW * (i + 1));
+                trackerData[i].cur_img = ptr->image.rowRange(ROW * i, ROW * (i + 1)); // 直接赋值图像块
         }
 
+        // 调试去畸变效果
 #if SHOW_UNDISTORTION
         trackerData[i].showUndistortion("undistrotion_" + std::to_string(i));
 #endif
     }
 
+    // 特征ID更新​
     for (unsigned int i = 0;; i++)
     {
         bool completed = false;
@@ -205,19 +231,22 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "feature_tracker");
+    ros::init(argc, argv, "feature_tracker");                                   // 初始化 ROS 节点，节点名为 "feature_tracker"
     ros::NodeHandle n("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
-    readParameters(n);
+    readParameters(n);                                                          // 从 ROS 参数服务器读取配置文件参数
 
     for (int i = 0; i < NUM_OF_CAM; i++)
-        trackerData[i].readIntrinsicParameter(CAM_NAMES[i]);
+        trackerData[i].readIntrinsicParameter(CAM_NAMES[i]);                    // 读取每个相机的内参文件
 
+    // 鱼眼相机掩模处理​
     if(FISHEYE)
     {
         for (int i = 0; i < NUM_OF_CAM; i++)
         {
+            // 加载鱼眼掩模图像
             trackerData[i].fisheye_mask = cv::imread(FISHEYE_MASK, 0);
+            // 检查是否加载成功
             if(!trackerData[i].fisheye_mask.data)
             {
                 ROS_INFO("load mask fail");
@@ -228,11 +257,12 @@ int main(int argc, char **argv)
         }
     }
 
+    // 订阅图像话题
     ros::Subscriber sub_img = n.subscribe(IMAGE_TOPIC, 100, img_callback);
 
-    pub_img = n.advertise<sensor_msgs::PointCloud>("feature", 1000);
-    pub_match = n.advertise<sensor_msgs::Image>("feature_img",1000);
-    pub_restart = n.advertise<std_msgs::Bool>("restart",1000);
+    pub_img = n.advertise<sensor_msgs::PointCloud>("feature", 1000);            // 特征点数据（归一化坐标 + ID）
+    pub_match = n.advertise<sensor_msgs::Image>("feature_img",1000);            // 带特征跟踪结果的可视化图像
+    pub_restart = n.advertise<std_msgs::Bool>("restart",1000);                  // 重启信号（当跟踪失败时触发）
     /*
     if (SHOW_TRACK)
         cv::namedWindow("vis", cv::WINDOW_NORMAL);

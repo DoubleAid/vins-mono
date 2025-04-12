@@ -94,10 +94,10 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 
     TicToc t_r;
     // 多相机特征跟踪​
-    ​​// 图像分块​​：若为多相机（如双目），从完整图像中提取对应相机的行区域（rowRange）。
-​​    // 直方图均衡化​​：当 EQUALIZE=true 时，对图像进行自适应直方图均衡化（CLAHE），增强特征对比度。
-​    // ​特征跟踪​​：调用 trackerData[i].readImage() 执行核心跟踪逻辑（光流法 + 特征检测）。
-​    // ​去畸变可视化​​：调试时显示去畸变后的图像。
+    // 图像分块​​：若为多相机（如双目），从完整图像中提取对应相机的行区域（rowRange）。
+    // 直方图均衡化​​：当 EQUALIZE=true 时，对图像进行自适应直方图均衡化（CLAHE），增强特征对比度。
+    // ​特征跟踪​​：调用 trackerData[i].readImage() 执行核心跟踪逻辑（光流法 + 特征检测）。
+    // ​去畸变可视化​​：调试时显示去畸变后的图像。
 
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
@@ -140,10 +140,10 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
    {
         pub_count++;
         sensor_msgs::PointCloudPtr feature_points(new sensor_msgs::PointCloud);
-        sensor_msgs::ChannelFloat32 id_of_point;
-        sensor_msgs::ChannelFloat32 u_of_point;
+        sensor_msgs::ChannelFloat32 id_of_point;                // 点的ID
+        sensor_msgs::ChannelFloat32 u_of_point;                 // 图片的横坐标
         sensor_msgs::ChannelFloat32 v_of_point;
-        sensor_msgs::ChannelFloat32 velocity_x_of_point;
+        sensor_msgs::ChannelFloat32 velocity_x_of_point;        // 光流速度
         sensor_msgs::ChannelFloat32 velocity_y_of_point;
 
         feature_points->header = img_msg->header;

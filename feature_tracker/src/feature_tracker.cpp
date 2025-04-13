@@ -81,9 +81,10 @@ void FeatureTracker::addPoints()
 void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
 {
     cv::Mat img;
-    TicToc t_r;
+    TicToc t_r;             // 创建一个计时器，并开始计时
     cur_time = _cur_time;
 
+    // 如果需要均衡化，增强图片的对比度
     if (EQUALIZE)
     {
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
@@ -94,6 +95,10 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     else
         img = _img;
 
+    // 我的推断
+    // prev_img 是上一帧的图像
+    // cur_img 是这一帧的图像
+    // forw_img 是估计的下一帧的图像，也就是输入的帧
     if (forw_img.empty())
     {
         prev_img = cur_img = forw_img = img;
@@ -103,13 +108,17 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         forw_img = img;
     }
 
+    // 清空当前帧跟踪点
     forw_pts.clear();
 
+    // 如果当前帧的跟踪点不为零
     if (cur_pts.size() > 0)
     {
         TicToc t_o;
-        vector<uchar> status;
-        vector<float> err;
+        vector<uchar> status;       // 跟踪状态（1成功，0失败）
+        vector<float> err;          // 跟踪误差
+
+        // LK光流跟踪：从 cur_img 到 forw_img 跟踪 cur_pts
         cv::calcOpticalFlowPyrLK(cur_img, forw_img, cur_pts, forw_pts, status, err, cv::Size(21, 21), 3);
 
         for (int i = 0; i < int(forw_pts.size()); i++)

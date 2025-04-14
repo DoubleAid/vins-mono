@@ -122,8 +122,10 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         cv::calcOpticalFlowPyrLK(cur_img, forw_img, cur_pts, forw_pts, status, err, cv::Size(21, 21), 3);
 
         for (int i = 0; i < int(forw_pts.size()); i++)
+            // 如果在边界，也删掉
             if (status[i] && !inBorder(forw_pts[i]))
                 status[i] = 0;
+        // 根据跟踪状态删除不符合的点
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);
         reduceVector(forw_pts, status);
@@ -132,10 +134,11 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         reduceVector(track_cnt, status);
         ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
     }
-
+    // 跟踪次数 track_cnt，每次更新成功，都会+1
     for (auto &n : track_cnt)
         n++;
 
+    // 如果需要发布这一帧
     if (PUB_THIS_FRAME)
     {
         rejectWithF();

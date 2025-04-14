@@ -58,16 +58,16 @@ class FeatureTracker
     cv::Mat prev_img, cur_img, forw_img;
     
     vector<cv::Point2f> n_pts;
-    vector<cv::Point2f> prev_pts, cur_pts, forw_pts;
-    vector<cv::Point2f> prev_un_pts, cur_un_pts;
-    vector<cv::Point2f> pts_velocity;
+    vector<cv::Point2f> prev_pts, cur_pts, forw_pts;      // 特征点坐标。
+    vector<cv::Point2f> prev_un_pts, cur_un_pts;          // 去畸变后的归一化坐标点。
+    vector<cv::Point2f> pts_velocity;                     // 特征点的速度，可能用于估计运动或预测下一帧的位置。也可以用于聚类区分静态和动态
     vector<int> ids;
-    vector<int> track_cnt;
+    vector<int> track_cnt;                                // 跟踪计数，记录每个特征点被连续跟踪的帧数。
     map<int, cv::Point2f> cur_un_pts_map;
     map<int, cv::Point2f> prev_un_pts_map;
-    camodocal::CameraPtr m_camera;
+    camodocal::CameraPtr m_camera;                        // 相机模型指针，用于去畸变和投影操作。
     double cur_time;
     double prev_time;
 
-    static int n_id;
+    static int n_id;                                      // 静态变量，可能用于生成唯一的特征ID。
 };

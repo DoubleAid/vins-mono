@@ -17,9 +17,9 @@ Estimator estimator;                                // 估计器
 
 std::condition_variable con;
 double current_time = -1;                           // -1 表示初始化第一个数据
-queue<sensor_msgs::ImuConstPtr> imu_buf;
-queue<sensor_msgs::PointCloudConstPtr> feature_buf;
-queue<sensor_msgs::PointCloudConstPtr> relo_buf;
+queue<sensor_msgs::ImuConstPtr> imu_buf;            // imu数据缓存
+queue<sensor_msgs::PointCloudConstPtr> feature_buf; // 图像特征缓存
+queue<sensor_msgs::PointCloudConstPtr> relo_buf;    // 重定位数据缓存，回环检测
 int sum_of_wait = 0;
 
 std::mutex m_buf;
@@ -28,48 +28,56 @@ std::mutex i_buf;
 std::mutex m_estimator;
 
 double latest_time;
-Eigen::Vector3d tmp_P;
-Eigen::Quaterniond tmp_Q;
-Eigen::Vector3d tmp_V;
-Eigen::Vector3d tmp_Ba;
+Eigen::Vector3d tmp_P;                              // 当前位置（世界坐标系下）。
+Eigen::Quaterniond tmp_Q;                           // 当前姿态四元数（世界坐标系下）。
+Eigen::Vector3d tmp_V;                              // 当前速度（世界坐标系下）。
+Eigen::Vector3d tmp_Ba;                             // 加速度计和陀螺仪的偏置（需在优化器中估计）。
 Eigen::Vector3d tmp_Bg;
-Eigen::Vector3d acc_0;
-Eigen::Vector3d gyr_0;
+Eigen::Vector3d acc_0;                              // 上一时刻的 ​​原始加速度计测量值​​（未去偏置、未转换坐标系）。
+Eigen::Vector3d gyr_0;                              // 上一时刻的 ​​原始陀螺仪测量值​​（未去偏置）。
 bool init_feature = 0;
 bool init_imu = 1;
 double last_imu_t = 0;
 
+// predict 函数的作用是基于 ​​IMU 测量值​​ 进行 ​​状态预测​​，通过积分更新当前时刻的姿态、位置和速度。以下是其核心功能的分步解析：
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
     double t = imu_msg->header.stamp.toSec();
+    // 如果是初始化状态，记录当前时间并返回
     if (init_imu)
     {
         latest_time = t;
         init_imu = 0;
         return;
     }
+    // 计算时间差 dt 并更新 latest_time
     double dt = t - latest_time;
     latest_time = t;
 
+    // 提取 IMU 线性加速度
     double dx = imu_msg->linear_acceleration.x;
     double dy = imu_msg->linear_acceleration.y;
     double dz = imu_msg->linear_acceleration.z;
     Eigen::Vector3d linear_acceleration{dx, dy, dz};
 
+    // 提取 IMU 角速度
     double rx = imu_msg->angular_velocity.x;
     double ry = imu_msg->angular_velocity.y;
     double rz = imu_msg->angular_velocity.z;
     Eigen::Vector3d angular_velocity{rx, ry, rz};
 
+    // 加速度去偏置 + 转换到世界坐标系
     Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - estimator.g;
 
+    // 角速度去偏置
     Eigen::Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - tmp_Bg;
+    // 四元数更新
     tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt);
-
+    // 加速度更新
     Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - estimator.g;
-
+    // 平均加速度（中值积分）
     Eigen::Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
-
+    // 根据中值积分加速度计算当前位置和速度
     tmp_P = tmp_P + dt * tmp_V + 0.5 * dt * dt * un_acc;
     tmp_V = tmp_V + dt * un_acc;
 
@@ -140,15 +148,19 @@ getMeasurements()
     return measurements;
 }
 
+// IMU回调函数
 void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 {
+    // 如果时间乱序了，直接不要了
     if (imu_msg->header.stamp.toSec() <= last_imu_t)
     {
         ROS_WARN("imu message in disorder!");
         return;
     }
+    // 更新最新时间戳
     last_imu_t = imu_msg->header.stamp.toSec();
 
+    // 将IMU数据存储到IMU队列中
     m_buf.lock();
     imu_buf.push(imu_msg);
     m_buf.unlock();
@@ -166,7 +178,8 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
     }
 }
 
-
+// 特征点回调函数
+// 将特征点存储到特征队列中
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
 {
     if (!init_feature)
@@ -181,12 +194,14 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
     con.notify_one();
 }
 
+// 图像中断，重新启动
 void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
 {
     if (restart_msg->data == true)
     {
         ROS_WARN("restart the estimator!");
         m_buf.lock();
+        // 晴空特征队列和IMU队列
         while(!feature_buf.empty())
             feature_buf.pop();
         while(!imu_buf.empty())
@@ -211,6 +226,7 @@ void relocalization_callback(const sensor_msgs::PointCloudConstPtr &points_msg)
 }
 
 // thread: visual-inertial odometry
+// 视觉惯性里程计
 void process()
 {
     while (true)

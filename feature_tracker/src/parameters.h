@@ -13,7 +13,7 @@ extern std::string IMU_TOPIC;               // IMU的topic
 extern std::string FISHEYE_MASK;            // 鱼眼掩模
 extern std::vector<std::string> CAM_NAMES;  // 相机名称数组
 extern int MAX_CNT;
-extern int MIN_DIST;
+extern int MIN_DIST;                        // 特征点之间的距离最小
 extern int WINDOW_SIZE;
 extern int FREQ;                            // 每秒更新的帧数
 extern double F_THRESHOLD;

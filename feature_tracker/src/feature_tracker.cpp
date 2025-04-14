@@ -33,20 +33,28 @@ FeatureTracker::FeatureTracker()
 {
 }
 
+// 创建掩码 mask，避免在已有特征点附近检测新点。
+// 全白掩码（普通相机）或鱼眼掩码。
+​// ​动态更新​​：每保留一个特征点，就在掩码上标记其周围 MIN_DIST 区域为禁止（0），确保后续检测的新点不会与已有点过于接近。
+​// ​效果​​：特征点均匀分布，避免密集区域重复检测。
 void FeatureTracker::setMask()
 {
+    // 使用预定义的鱼眼相机掩码
     if(FISHEYE)
         mask = fisheye_mask.clone();
     else
+        // 普通相机：全白掩码
+        // 初始化全白掩码（255表示允许检测特征点的区域）。
         mask = cv::Mat(ROW, COL, CV_8UC1, cv::Scalar(255));
-    
 
     // prefer to keep features that are tracked for long time
     vector<pair<int, pair<cv::Point2f, int>>> cnt_pts_id;
 
     for (unsigned int i = 0; i < forw_pts.size(); i++)
+        // 将跟踪次数、当前帧坐标、ID 打包存入列表
         cnt_pts_id.push_back(make_pair(track_cnt[i], make_pair(forw_pts[i], ids[i])));
 
+    // 按跟踪次数从高到低排序
     sort(cnt_pts_id.begin(), cnt_pts_id.end(), [](const pair<int, pair<cv::Point2f, int>> &a, const pair<int, pair<cv::Point2f, int>> &b)
          {
             return a.first > b.first;
@@ -58,16 +66,20 @@ void FeatureTracker::setMask()
 
     for (auto &it : cnt_pts_id)
     {
+        // 检查当前点是否在允许区域
         if (mask.at<uchar>(it.second.first) == 255)
         {
+            // 保留该点
             forw_pts.push_back(it.second.first);
             ids.push_back(it.second.second);
             track_cnt.push_back(it.first);
+            // 在掩码上屏蔽周围区域，防止重复检测
             cv::circle(mask, it.second.first, MIN_DIST, 0, -1);
         }
     }
 }
 
+// 添加特征点
 void FeatureTracker::addPoints()
 {
     for (auto &p : n_pts)
@@ -78,6 +90,7 @@ void FeatureTracker::addPoints()
     }
 }
 
+// 主流程
 void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
 {
     cv::Mat img;
@@ -125,7 +138,7 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
             // 如果在边界，也删掉
             if (status[i] && !inBorder(forw_pts[i]))
                 status[i] = 0;
-        // 根据跟踪状态删除不符合的点
+        // 根据跟踪状态删除没有跟踪到的点
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);
         reduceVector(forw_pts, status);
@@ -141,14 +154,17 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     // 如果需要发布这一帧
     if (PUB_THIS_FRAME)
     {
+        // 通过基础矩阵（Fundamental Matrix）和 RANSAC 剔除误匹配的特征点（外点剔除）。
         rejectWithF();
         ROS_DEBUG("set mask begins");
         TicToc t_m;
+        // 去除哪些距离较近的点，放置特征点密集组合
         setMask();
         ROS_DEBUG("set mask costs %fms", t_m.toc());
 
         ROS_DEBUG("detect feature begins");
         TicToc t_t;
+        // 需要添加的特征点数目
         int n_max_cnt = MAX_CNT - static_cast<int>(forw_pts.size());
         if (n_max_cnt > 0)
         {
@@ -158,6 +174,7 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
                 cout << "mask type wrong " << endl;
             if (mask.size() != forw_img.size())
                 cout << "wrong size " << endl;
+            // n_pts 是一个输出参数​​，用于存储检测到的特征点（角点）的像素坐标。
             cv::goodFeaturesToTrack(forw_img, n_pts, MAX_CNT - forw_pts.size(), 0.01, MIN_DIST, mask);
         }
         else
@@ -166,9 +183,11 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
 
         ROS_DEBUG("add feature begins");
         TicToc t_a;
+        // 添加特征点
         addPoints();
         ROS_DEBUG("selectFeature costs: %fms", t_a.toc());
     }
+    // 更新当前的图片和特征点
     prev_img = cur_img;
     prev_pts = cur_pts;
     prev_un_pts = cur_un_pts;
@@ -178,8 +197,13 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     prev_time = cur_time;
 }
 
+// 通过基础矩阵（Fundamental Matrix）和 RANSAC 剔除误匹配的特征点（外点剔除）。
+// 已经知道 x1Fx2 = 0，  F = K^-T * t X R* K^-1
+// 已经知道 K 也就是内参矩阵
+// 我们使用 RANSAC 来计算 基础矩阵，使用8点法
 void FeatureTracker::rejectWithF()
 {
+    // 如果点的数量小于8，就不需要进行剔除
     if (forw_pts.size() >= 8)
     {
         ROS_DEBUG("FM ransac begins");
@@ -188,7 +212,10 @@ void FeatureTracker::rejectWithF()
         for (unsigned int i = 0; i < cur_pts.size(); i++)
         {
             Eigen::Vector3d tmp_p;
+            // 去畸变：将像素坐标转换到归一化平面
+            // 相机模版指针支持多个相机，每个相机都有去畸变的方法
             m_camera->liftProjective(Eigen::Vector2d(cur_pts[i].x, cur_pts[i].y), tmp_p);
+            // 重新投影到虚拟无畸变图像的像素坐标
             tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
             tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
             un_cur_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
@@ -200,8 +227,10 @@ void FeatureTracker::rejectWithF()
         }
 
         vector<uchar> status;
+        // 计算基础矩阵并标记内点​
         cv::findFundamentalMat(un_cur_pts, un_forw_pts, cv::FM_RANSAC, F_THRESHOLD, 0.99, status);
         int size_a = cur_pts.size();
+        // 剔除外点
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);
         reduceVector(forw_pts, status);
@@ -213,6 +242,7 @@ void FeatureTracker::rejectWithF()
     }
 }
 
+// 更新ID
 bool FeatureTracker::updateID(unsigned int i)
 {
     if (i < ids.size())
@@ -225,12 +255,15 @@ bool FeatureTracker::updateID(unsigned int i)
         return false;
 }
 
+// 读取内参
 void FeatureTracker::readIntrinsicParameter(const string &calib_file)
 {
     ROS_INFO("reading paramerter of camera %s", calib_file.c_str());
     m_camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file);
 }
 
+// ​​去畸变与归一化坐标转换​​：将当前帧的特征点从像素坐标系转换到归一化平面坐标系（z=1）。
+​// ​计算特征点速度​​：基于上一帧的归一化坐标和时间差，估计特征点的运动速度。
 void FeatureTracker::showUndistortion(const string &name)
 {
     cv::Mat undistortedImg(ROW + 600, COL + 600, CV_8UC1, cv::Scalar(0));
@@ -267,27 +300,39 @@ void FeatureTracker::showUndistortion(const string &name)
     cv::waitKey(0);
 }
 
+// ​​去畸变与归一化坐标转换​​：将当前帧的特征点从像素坐标系转换到归一化平面坐标系（z=1）。
+​// ​计算特征点速度​​：基于上一帧的归一化坐标和时间差，估计特征点的运动速度
 void FeatureTracker::undistortedPoints()
 {
+    // 清空当前帧归一化坐标列表
     cur_un_pts.clear();
+    // 清空当前帧归一化坐标的ID-坐标映射表
     cur_un_pts_map.clear();
+
     //cv::undistortPoints(cur_pts, un_pts, K, cv::Mat());
+    // 遍历所有当前帧特征点
     for (unsigned int i = 0; i < cur_pts.size(); i++)
     {
         Eigen::Vector2d a(cur_pts[i].x, cur_pts[i].y);
         Eigen::Vector3d b;
+
+        // 去畸变并投影到归一化平面
         m_camera->liftProjective(a, b);
+        // 归一化到 z=1 平面
         cur_un_pts.push_back(cv::Point2f(b.x() / b.z(), b.y() / b.z()));
+        // 存储ID-坐标映射
         cur_un_pts_map.insert(make_pair(ids[i], cv::Point2f(b.x() / b.z(), b.y() / b.z())));
         //printf("cur pts id %d %f %f", ids[i], cur_un_pts[i].x, cur_un_pts[i].y);
     }
     // caculate points velocity
     if (!prev_un_pts_map.empty())
     {
+        // 计算时间差
         double dt = cur_time - prev_time;
         pts_velocity.clear();
         for (unsigned int i = 0; i < cur_un_pts.size(); i++)
         {
+            // 有效ID 只有存在本帧和上一帧存在匹配的点，才计算速度
             if (ids[i] != -1)
             {
                 std::map<int, cv::Point2f>::iterator it;

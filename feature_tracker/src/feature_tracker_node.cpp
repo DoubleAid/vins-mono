@@ -150,6 +150,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         feature_points->header.frame_id = "world";
 
         vector<set<int>> hash_ids(NUM_OF_CAM);
+        // 对于每一个相机
         for (int i = 0; i < NUM_OF_CAM; i++)
         {
             auto &un_pts = trackerData[i].cur_un_pts;

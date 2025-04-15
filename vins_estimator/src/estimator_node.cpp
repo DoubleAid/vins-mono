@@ -39,6 +39,7 @@ bool init_feature = 0;
 bool init_imu = 1;
 double last_imu_t = 0;
 
+// IMU 运动学传播 （传统积分，中值积分）
 // predict 函数的作用是基于 ​​IMU 测量值​​ 进行 ​​状态预测​​，通过积分更新当前时刻的姿态、位置和速度。以下是其核心功能的分步解析：
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
@@ -80,7 +81,7 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
     // 根据中值积分加速度计算当前位置和速度
     tmp_P = tmp_P + dt * tmp_V + 0.5 * dt * dt * un_acc;
     tmp_V = tmp_V + dt * un_acc;
-
+    // 更新上一次的数据
     acc_0 = linear_acceleration;
     gyr_0 = angular_velocity;
 }
@@ -88,15 +89,21 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 void update()
 {
     TicToc t_predict;
+    // 更新时间
     latest_time = current_time;
+    // 更新最新的当前位姿
     tmp_P = estimator.Ps[WINDOW_SIZE];
     tmp_Q = estimator.Rs[WINDOW_SIZE];
     tmp_V = estimator.Vs[WINDOW_SIZE];
+    // 更新偏置
     tmp_Ba = estimator.Bas[WINDOW_SIZE];
+    // 更新当前的重力加速度
     tmp_Bg = estimator.Bgs[WINDOW_SIZE];
+    // 更新当前的线速度和角速度
     acc_0 = estimator.acc_0;
     gyr_0 = estimator.gyr_0;
 
+    // 将队列里还没有进行处理的imu数据重新进行中值积分
     queue<sensor_msgs::ImuConstPtr> tmp_imu_buf = imu_buf;
     for (sensor_msgs::ImuConstPtr tmp_imu_msg; !tmp_imu_buf.empty(); tmp_imu_buf.pop())
         predict(tmp_imu_buf.front());
@@ -170,9 +177,18 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 
     {
         std::lock_guard<std::mutex> lg(m_state);
+        // 预积分 
+        // 执行 IMU 前向传播（预测）
         predict(imu_msg);
         std_msgs::Header header = imu_msg->header;
         header.frame_id = "world";
+        // 系统已通过初始化，进入稳定的 ​​非线性优化阶段​​。此时发布的里程计是可靠的（未初始化时的数据可能不稳定，故不发布）。
+        
+        // IMU 数据 → 运动学传播 → 发布预测值 → 后端优化 → 修正预测值 → 发布优化值。
+        
+        // 在非线性优化阶段，通过高频发布 IMU 预测值，满足实时性需求。
+        // 平衡实时性与精度，是实时 SLAM 系统的典型设计模式。
+        
         if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
             pubLatestOdometry(tmp_P, tmp_Q, tmp_V, header);
     }
@@ -385,6 +401,7 @@ void process()
         m_estimator.unlock();
         m_buf.lock();
         m_state.lock();
+        // 如果当前的状态已经是非线性优化状态，即正常状态，调用 update() 函数进行更新
         if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
             update();
         m_state.unlock();

@@ -65,11 +65,13 @@ class FeaturePerId
     int endFrame();
 };
 
+// 特征管理器
 class FeatureManager
 {
   public:
     FeatureManager(Matrix3d _Rs[]);
 
+    // 设置 camera 到 imu的旋转矩阵
     void setRic(Matrix3d _ric[]);
 
     void clearState();

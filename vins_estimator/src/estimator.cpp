@@ -8,27 +8,34 @@ Estimator::Estimator(): f_manager{Rs}
 
 void Estimator::setParameter()
 {
+    // 更新相机到imu的旋转矩阵和平移向量
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         tic[i] = TIC[i];
         ric[i] = RIC[i];
     }
+    // 更新相机imu的旋转外参
     f_manager.setRic(ric);
     ProjectionFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     ProjectionTdFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     td = TD;
 }
 
+// 重置系统状态（清除滑动窗口、预积分、特征跟踪等），用于系统重启或故障恢复。
 void Estimator::clearState()
 {
+    // 清楚滑动窗口内所有的帧
     for (int i = 0; i < WINDOW_SIZE + 1; i++)
     {
+        // 旋转矩阵设置为单位矩阵
         Rs[i].setIdentity();
         Ps[i].setZero();
         Vs[i].setZero();
         Bas[i].setZero();
         Bgs[i].setZero();
+        // 时间缓存清零
         dt_buf[i].clear();
+        // 线性加速度和角速度清零
         linear_acceleration_buf[i].clear();
         angular_velocity_buf[i].clear();
 
@@ -37,12 +44,14 @@ void Estimator::clearState()
         pre_integrations[i] = nullptr;
     }
 
+    // 重置 相机到imu 的变换矩阵
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         tic[i] = Vector3d::Zero();
         ric[i] = Matrix3d::Identity();
     }
 
+    // 清除所有图像帧的信息
     for (auto &it : all_image_frame)
     {
         if (it.second.pre_integration != nullptr)
@@ -52,8 +61,10 @@ void Estimator::clearState()
         }
     }
 
+    // 将 当前状态 修改为初始化
     solver_flag = INITIAL;
     first_imu = false,
+    // 清空统计特征点跟踪中的异常情况。
     sum_of_back = 0;
     sum_of_front = 0;
     frame_count = 0;
@@ -62,7 +73,7 @@ void Estimator::clearState()
     all_image_frame.clear();
     td = TD;
 
-
+    // 清空临时预积分和上一帧边缘化信息
     if (tmp_pre_integration != nullptr)
         delete tmp_pre_integration;
     if (last_marginalization_info != nullptr)
@@ -71,7 +82,7 @@ void Estimator::clearState()
     tmp_pre_integration = nullptr;
     last_marginalization_info = nullptr;
     last_marginalization_parameter_blocks.clear();
-
+    // 特征管理器清空
     f_manager.clearState();
 
     failure_occur = 0;
@@ -100,6 +111,7 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
     // 非首帧时进行预积分和运动学传播
     if (frame_count != 0)
     {
+        // 预积分
         pre_integrations[frame_count]->push_back(dt, linear_acceleration, angular_velocity);
         //if(solver_flag != NON_LINEAR)
             tmp_pre_integration->push_back(dt, linear_acceleration, angular_velocity);
@@ -108,7 +120,8 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
         linear_acceleration_buf[frame_count].push_back(linear_acceleration);
         angular_velocity_buf[frame_count].push_back(angular_velocity);
 
-        int j = frame_count;         
+        int j = frame_count;
+        // 更新加速度和速度
         Vector3d un_acc_0 = Rs[j] * (acc_0 - Bas[j]) - g;
         Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - Bgs[j];
         Rs[j] *= Utility::deltaQ(un_gyr * dt).toRotationMatrix();
@@ -125,56 +138,69 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
 {
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
+    // 添加特征点并检查视差（判断是否为关键帧）
     if (f_manager.addFeatureCheckParallax(frame_count, image, td))
-        marginalization_flag = MARGIN_OLD;
+        marginalization_flag = MARGIN_OLD;          // 视差足够大，标记为关键帧，边缘化旧帧
     else
-        marginalization_flag = MARGIN_SECOND_NEW;
+        marginalization_flag = MARGIN_SECOND_NEW;   // 视差小，标记为非关键帧，边缘化次新帧
 
     ROS_DEBUG("this frame is--------------------%s", marginalization_flag ? "reject" : "accept");
     ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
     ROS_DEBUG("Solving %d", frame_count);
     ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
-    Headers[frame_count] = header;
+    Headers[frame_count] = header;                  // 存储当前帧的时间戳
 
     ImageFrame imageframe(image, header.stamp.toSec());
-    imageframe.pre_integration = tmp_pre_integration;
+    imageframe.pre_integration = tmp_pre_integration;   // 关联预积分对象
+    // 存入全局帧集合
     all_image_frame.insert(make_pair(header.stamp.toSec(), imageframe));
+    // 重置预积分，也就是说每处理一帧，预积分对象都会被重置
     tmp_pre_integration = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
 
+    // 需要在线标定外参
     if(ESTIMATE_EXTRINSIC == 2)
     {
         ROS_INFO("calibrating extrinsic param, rotation movement is needed");
         if (frame_count != 0)
         {
+            // 获取相邻帧间的匹配特征点对。
             vector<pair<Vector3d, Vector3d>> corres = f_manager.getCorresponding(frame_count - 1, frame_count);
             Matrix3d calib_ric;
+            // 通过 ​​手眼标定（Hand-Eye Calibration）​​ 求解相机与 IMU 的相对旋转（ric）。
             if (initial_ex_rotation.CalibrationExRotation(corres, pre_integrations[frame_count]->delta_q, calib_ric))
             {
                 ROS_WARN("initial extrinsic rotation calib success");
                 ROS_WARN_STREAM("initial extrinsic rotation: " << endl << calib_ric);
-                ric[0] = calib_ric;
+                ric[0] = calib_ric;                     // 更新外参旋转
                 RIC[0] = calib_ric;
-                ESTIMATE_EXTRINSIC = 1;
+                ESTIMATE_EXTRINSIC = 1;                 // 标定完成，后续固定外参
             }
         }
     }
 
+    // 系统处于初始化阶段
     if (solver_flag == INITIAL)
     {
+        // // 滑动窗口已满
         if (frame_count == WINDOW_SIZE)
         {
-            bool result = false;
+            bool result = false;        // 将初始化结果先置为 false
+            // 无需标定外参而且 时长超过 0.1s
             if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
             {
+                // 执行初始化（视觉SFM + 惯性对齐）
+                // ​纯视觉初始化​​：通过 SFM 计算滑动窗口内的相机位姿和地图点。
+                // 视觉-惯性对齐​​：将视觉尺度与 IMU 数据对齐，估计速度、重力方向和尺度因子。
+                // 初始化成功的标志：重力方向、尺度、零偏等参数收敛。
                result = initialStructure();
                initial_timestamp = header.stamp.toSec();
             }
             if(result)
-            {
-                solver_flag = NON_LINEAR;
-                solveOdometry();
-                slideWindow();
-                f_manager.removeFailures();
+            {   // 初始化成功
+                solver_flag = NON_LINEAR;           // 切换至非线性优化阶段
+                solveOdometry();                    // 执行首次优化
+                slideWindow();                      // 滑动窗口
+                f_manager.removeFailures();         // 移除无效特征点
                 ROS_INFO("Initialization finish!");
                 last_R = Rs[WINDOW_SIZE];
                 last_P = Ps[WINDOW_SIZE];
@@ -183,57 +209,71 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
                 
             }
             else
-                slideWindow();
+                slideWindow();                      // 初始化失败，滑动窗口丢弃旧帧
         }
         else
-            frame_count++;
+            frame_count++;                          // 继续填充滑动窗口
     }
     else
-    {
+    {   // 系统处于非线性优化阶段
         TicToc t_solve;
+        // 执行非线性优化（Ceres求解）
         solveOdometry();
         ROS_DEBUG("solver costs: %fms", t_solve.toc());
-
+        // 检测系统故障（如IMU发散）
         if (failureDetection())
         {
             ROS_WARN("failure detection!");
             failure_occur = 1;
-            clearState();
-            setParameter();
-            ROS_WARN("system reboot!");
+            clearState();                           // 重置状态
+            setParameter();                         // 重新加载参数
+            ROS_WARN("system reboot!");             // 重启系统
             return;
         }
 
+        // solveOdometry​​：构建滑动窗口内的优化问题（IMU 残差、视觉残差、边缘化先验）。调用 Ceres 求解器进行非线性优化。
+        // failureDetection​​：检测异常状态（如速度或位置突变），防止系统崩溃。
+        // slideWindow​​：根据 marginalization_flag 执行边缘化，维护滑动窗口大小。
+
         TicToc t_margin;
-        slideWindow();
-        f_manager.removeFailures();
+        slideWindow();                              // 滑动窗口管理
+        f_manager.removeFailures();                 // 移除无效特征
         ROS_DEBUG("marginalization costs: %fms", t_margin.toc());
         // prepare output of VINS
+        // 更新输出位姿（用于可视化或控制）
         key_poses.clear();
         for (int i = 0; i <= WINDOW_SIZE; i++)
             key_poses.push_back(Ps[i]);
 
         last_R = Rs[WINDOW_SIZE];
         last_P = Ps[WINDOW_SIZE];
-        last_R0 = Rs[0];
-        last_P0 = Ps[0];
+        last_R0 = Rs[0];                            // 最新帧姿态
+        last_P0 = Ps[0];                            // 最新帧位置
     }
 }
+
+// 当滑动窗口满了之后，且不需要在线标定，且时长大于0.1s
+// 通过 ​​纯视觉SFM（Structure from Motion）​​ 估计滑动窗口内所有帧的 ​​位姿​​ 和 ​​地图点​​，
+// 为后续的 ​​视觉-惯性对齐​​ 提供初始值。若初始化失败，系统会继续等待足够激励的 IMU 数据。
 bool Estimator::initialStructure()
 {
     TicToc t_sfm;
     //check imu observibility
     {
+        // 计算IMU加速度的方差，判断是否有足够运动激励
         map<double, ImageFrame>::iterator frame_it;
         Vector3d sum_g;
         for (frame_it = all_image_frame.begin(), frame_it++; frame_it != all_image_frame.end(); frame_it++)
         {
             double dt = frame_it->second.pre_integration->sum_dt;
+            // 计算当前帧的平均加速度
             Vector3d tmp_g = frame_it->second.pre_integration->delta_v / dt;
             sum_g += tmp_g;
         }
         Vector3d aver_g;
+        // 计算所有帧的平均加速度
         aver_g = sum_g * 1.0 / ((int)all_image_frame.size() - 1);
+        // 计算平均加速度的方差
         double var = 0;
         for (frame_it = all_image_frame.begin(), frame_it++; frame_it != all_image_frame.end(); frame_it++)
         {
@@ -244,6 +284,8 @@ bool Estimator::initialStructure()
         }
         var = sqrt(var / ((int)all_image_frame.size() - 1));
         //ROS_WARN("IMU variation %f!", var);
+        // 阈值判断，如果加速度方差小于0.25，则认为IMU激励不足
+        // 检测 IMU 是否有足够的运动（加速度变化），避免在静止或匀速状态下初始化失败。
         if(var < 0.25)
         {
             ROS_INFO("IMU excitation not enouth!");
@@ -251,9 +293,11 @@ bool Estimator::initialStructure()
         }
     }
     // global sfm
-    Quaterniond Q[frame_count + 1];
+    // 将特征管理器中的特征点转换为全局 SFM 所需的格式（SFMFeature）。
+    Quaterniond Q[frame_count + 1];         // 定义所有帧的旋转矩阵和平移向量
     Vector3d T[frame_count + 1];
     map<int, Vector3d> sfm_tracked_points;
+    // SFMFeature：包含特征点 ID 及其在所有帧中的观测坐标（用于多视图三角化）。
     vector<SFMFeature> sfm_f;
     for (auto &it_per_id : f_manager.feature)
     {

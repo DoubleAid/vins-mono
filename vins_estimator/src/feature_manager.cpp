@@ -41,57 +41,75 @@ int FeatureManager::getFeatureCount()
     return cnt;
 }
 
-
+// 添加特征点并检查视差（判断是否为关键帧）
+// frame_count 滑动窗口当前的帧数
+// image 的结构 {特征ID : {
+//      相机ID : {
+//          x, y, z,    //  归一化坐标
+//          p_u, p_v,   //  像素平面的位置
+//          velocity_x, velocity_y  // 光流速度
+// }}
 bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
 {
     ROS_DEBUG("input feature: %d", (int)image.size());
     ROS_DEBUG("num of feature: %d", getFeatureCount());
-    double parallax_sum = 0;
-    int parallax_num = 0;
-    last_track_num = 0;
+    double parallax_sum = 0;            // 视差和
+    int parallax_num = 0;               // 视差点数
+    last_track_num = 0;                 // 当前帧成功跟踪的特征点数目
+    // 遍历当前帧的每个特征点（id_pts.first为特征ID）
     for (auto &id_pts : image)
     {
+        // 创建 FeaturePerFrame 对象，存储当前帧的特征信息（像素坐标、速度等）
+        // 将 7 维向量放到 FeaturePerFrame 对象中
         FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
-
+        // 提取特征ID
         int feature_id = id_pts.first;
+        // 在现有特征库中查找该ID是否存在
         auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
                           {
             return it.feature_id == feature_id;
                           });
 
-        if (it == feature.end())
+        if (it == feature.end())    // 特征ID不存在，添加新特征
         {
-            feature.push_back(FeaturePerId(feature_id, frame_count));
-            feature.back().feature_per_frame.push_back(f_per_fra);
+            feature.push_back(FeaturePerId(feature_id, frame_count));   // 创建新特征，记录起始帧
+            feature.back().feature_per_frame.push_back(f_per_fra);      // 添加当前帧观测
         }
-        else if (it->feature_id == feature_id)
+        else if (it->feature_id == feature_id)                          // 特征ID存在，更新跟踪信息
         {
-            it->feature_per_frame.push_back(f_per_fra);
-            last_track_num++;
+            it->feature_per_frame.push_back(f_per_fra);                 // 更新当前帧观测
+            last_track_num++;                                           // 成功跟踪数+1
         }
     }
-
+    // 如果滑动窗口的帧数太少，或者当前帧的追踪数目小于20
     if (frame_count < 2 || last_track_num < 20)
+        // 强制视为关键帧，确保系统能快速初始化或恢复跟踪
         return true;
 
-    for (auto &it_per_id : feature)
+    for (auto &it_per_id : feature) // 遍历所有特征
     {
-        if (it_per_id.start_frame <= frame_count - 2 &&
-            it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1)
+        // 仅处理满足时间窗口条件的特征 （起始帧在窗口内且当前帧可见
+        if (it_per_id.start_frame <= frame_count - 2 &&     // 起始帧与当前帧的间隔大于等于2，也就是至少有三帧 可以用来计算视差
+            it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1) // 在起始帧和当前帧期间，这个特征都可见
         {
+            // 累加补偿后的视差，起始就是计算
             parallax_sum += compensatedParallax2(it_per_id, frame_count);
+            // 参与计算的共视特征数+1
             parallax_num++;
         }
     }
 
-    if (parallax_num == 0)
+    if (parallax_num == 0)  // 无共视特征计算视差
     {
+        // 视为关键帧（保守策略，避免漏检）
         return true;
     }
     else
     {
         ROS_DEBUG("parallax_sum: %lf, parallax_num: %d", parallax_sum, parallax_num);
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
+        // 平均视差是否超过阈值
+        // 也就是相机位姿变化是否足够大，足够大就认为是关键帧
         return parallax_sum / parallax_num >= MIN_PARALLAX;
     }
 }
@@ -117,9 +135,11 @@ void FeatureManager::debugShow()
     }
 }
 
+// 查找 l 和 r 帧的特征点对
 vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_count_l, int frame_count_r)
 {
     vector<pair<Vector3d, Vector3d>> corres;
+    // 遍历所有特征点
     for (auto &it : feature)
     {
         if (it.start_frame <= frame_count_l && it.endFrame() >= frame_count_r)
@@ -356,6 +376,7 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int f
 {
     //check the second last frame is keyframe or not
     //parallax betwwen seconde last frame and third last frame
+    // 如果总帧是 10 起始帧是3 选取导数第二和第三
     const FeaturePerFrame &frame_i = it_per_id.feature_per_frame[frame_count - 2 - it_per_id.start_frame];
     const FeaturePerFrame &frame_j = it_per_id.feature_per_frame[frame_count - 1 - it_per_id.start_frame];
 
@@ -368,6 +389,7 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int f
     Vector3d p_i = frame_i.point;
     Vector3d p_i_comp;
 
+    // 补偿相机旋转对特征点位置的影响，仅保留平移引起的视差（更准确反映场景深度变化）。
     //int r_i = frame_count - 2;
     //int r_j = frame_count - 1;
     //p_i_comp = ric[camera_id_j].transpose() * Rs[r_j].transpose() * Rs[r_i] * ric[camera_id_i] * p_i;

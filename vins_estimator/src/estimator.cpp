@@ -259,6 +259,9 @@ bool Estimator::initialStructure()
 {
     TicToc t_sfm;
     //check imu observibility
+    // 检查IMU的激励，因为IMU是由加速度计和陀螺仪组成，为了测量传感器的偏置，需要一定的运动激励。
+    // 静止时：加速度计输出固定重力向量，无法区分传感器偏置和真实的加速度
+    // 匀速时：加速度为0（忽略重力），无法通过积分获取速度变化，导致速度初始化不准
     {
         // 计算IMU加速度的方差，判断是否有足够运动激励
         map<double, ImageFrame>::iterator frame_it;
@@ -293,34 +296,47 @@ bool Estimator::initialStructure()
         }
     }
     // global sfm
+    
     // 将特征管理器中的特征点转换为全局 SFM 所需的格式（SFMFeature）。
     Quaterniond Q[frame_count + 1];         // 定义所有帧的旋转矩阵和平移向量
     Vector3d T[frame_count + 1];
     map<int, Vector3d> sfm_tracked_points;
     // SFMFeature：包含特征点 ID 及其在所有帧中的观测坐标（用于多视图三角化）。
-    vector<SFMFeature> sfm_f;
+    vector<SFMFeature> sfm_f;               // 全局SFM所需的特征结构
+    // 遍历所有特征点
+    // 将特征管理器中的特征转换为全局SFM所需的格式，每个特征包含其所有观测帧及对应坐标。
     for (auto &it_per_id : f_manager.feature)
     {
         int imu_j = it_per_id.start_frame - 1;
         SFMFeature tmp_feature;
         tmp_feature.state = false;
-        tmp_feature.id = it_per_id.feature_id;
+        tmp_feature.id = it_per_id.feature_id;      // 特征点ID
+        // 遍历该特征在所有帧中的观测
         for (auto &it_per_frame : it_per_id.feature_per_frame)
         {
             imu_j++;
             Vector3d pts_j = it_per_frame.point;
+            // 记录帧索引和观测坐标
             tmp_feature.observation.push_back(make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
         }
         sfm_f.push_back(tmp_feature);
     } 
     Matrix3d relative_R;
     Vector3d relative_T;
-    int l;
+    int l;              // 参考帧索引
+    // 选择两帧（通常为滑动窗口的首帧和中间帧），计算其相对位姿（relative_R, relative_T）。
+    // 特征数不足或视差过小，无法可靠计算相对位姿。
+    // 这个函数的作用是找到滑动窗口中的某一帧，和当前最新的帧之间有足够的对应特征点和视差，从而计算它们之间的相对位姿。
     if (!relativePose(relative_R, relative_T, l))
     {
         ROS_INFO("Not enough features or parallax; Move device around");
         return false;
     }
+
+    // 执行全局SFM，核心步骤包括：
+    // ​​三角化初始点​​：利用相对位姿恢复初始3D点。
+    // ​增量式BA​​：逐步添加帧并优化位姿和地图点。
+    // 全局BA​​：联合优化所有变量，最小化重投影误差。
     GlobalSFM sfm;
     if(!sfm.construct(frame_count + 1, Q, T, l,
               relative_R, relative_T,
@@ -331,14 +347,23 @@ bool Estimator::initialStructure()
         return false;
     }
 
-    //solve pnp for all frame
+    // PnP求解非关键帧位姿​
+    // 直接使用SFM结果，无需计算。
+    // ​非关键帧​​
+    //      ​初始猜测​​：使用相邻关键帧的位姿作为初始值。
+    //      3D-2D匹配​​：利用 sfm_tracked_points 中的3D点与当前帧的2D观测进行匹配。
+    //      PnP求解​​：调用OpenCV的 solvePnP 计算当前帧位姿。
+    //      坐标系转换​​：将结果从相机坐标系转换到IMU坐标系（考虑外参 RIC[0]）。
+    // solve pnp for all frame
     map<double, ImageFrame>::iterator frame_it;
     map<int, Vector3d>::iterator it;
-    frame_it = all_image_frame.begin( );
+    frame_it = all_image_frame.begin( );        // 当前帧
     for (int i = 0; frame_it != all_image_frame.end( ); frame_it++)
     {
         // provide initial guess
+        // 关键帧直接使用SFM结果
         cv::Mat r, rvec, t, D, tmp_r;
+        // 如果是当前帧就是关键帧，就直接使用SFM结果
         if((frame_it->first) == Headers[i].stamp.toSec())
         {
             frame_it->second.is_key_frame = true;
@@ -347,10 +372,12 @@ bool Estimator::initialStructure()
             i++;
             continue;
         }
+        // 如果当前帧的时间在 关键帧 之后，就使用下一个关键帧
         if((frame_it->first) > Headers[i].stamp.toSec())
         {
             i++;
         }
+        // 非关键帧通过PnP求解
         Matrix3d R_inital = (Q[i].inverse()).toRotationMatrix();
         Vector3d P_inital = - R_inital * T[i];
         cv::eigen2cv(R_inital, tmp_r);
@@ -378,17 +405,20 @@ bool Estimator::initialStructure()
             }
         }
         cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);     
+        // 找到对应的3D点和2D点
         if(pts_3_vector.size() < 6)
         {
             cout << "pts_3_vector size " << pts_3_vector.size() << endl;
             ROS_DEBUG("Not enough points for solve pnp !");
             return false;
         }
+        // 使用cv::solvePnP求解位姿
         if (! cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, 1))
         {
             ROS_DEBUG("solve pnp fail!");
             return false;
         }
+        // 转换结果到Eigen格式
         cv::Rodrigues(rvec, r);
         MatrixXd R_pnp,tmp_R_pnp;
         cv::cv2eigen(r, tmp_R_pnp);
@@ -399,6 +429,12 @@ bool Estimator::initialStructure()
         frame_it->second.R = R_pnp * RIC[0].transpose();
         frame_it->second.T = T_pnp;
     }
+    // 视觉-惯性对齐​
+    // 将视觉SFM结果与IMU预积分数据对齐，估计：
+    // 尺度因子（Scale）​​：将视觉的米制单位与IMU的物理单位统一。
+    // 重力方向​​：优化重力向量，修正SFM的倾斜。
+    // ​速度与零偏​​：各帧的速度和IMU零偏。
+    // ​失败条件​​：IMU与视觉数据矛盾（如运动激励不足或初始化误差过大）。
     if (visualInitialAlign())
         return true;
     else
@@ -409,6 +445,9 @@ bool Estimator::initialStructure()
 
 }
 
+// 通过视觉惯性对齐（Visual-Inertial Alignment），恢复单目 SLAM 的 ​​尺度​​、​​重力方向​​、​​各帧速度​​，并对齐视觉与 IMU 坐标系。
+// 输入​​：视觉 SFM 结果（各帧位姿、地图点）、IMU 预积分数据。
+// 对齐后的位姿、速度、地图点，以及全局重力方向。
 bool Estimator::visualInitialAlign()
 {
     TicToc t_g;
@@ -487,17 +526,23 @@ bool Estimator::visualInitialAlign()
     return true;
 }
 
+// 这个函数的作用是找到滑动窗口中的某一帧，和当前最新的帧之间有足够的对应特征点和视差，从而计算它们之间的相对位姿。
+// relative_R、relative_T和l，用来返回相对旋转、平移和选中的帧索引。函数返回一个布尔值，表示是否成功找到合适的帧对。
 bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
 {
     // find previous frame which contians enough correspondance and parallex with newest frame
+    // 遍历滑动窗口中的每一帧（从0到WINDOW_SIZE-1），对于每个帧i，获取它和最新帧（WINDOW_SIZE）之间的对应特征点。
     for (int i = 0; i < WINDOW_SIZE; i++)
     {
         vector<pair<Vector3d, Vector3d>> corres;
+        // 获取特征点对列表
         corres = f_manager.getCorresponding(i, WINDOW_SIZE);
+        // 如果特征点对足够多
         if (corres.size() > 20)
         {
             double sum_parallax = 0;
             double average_parallax;
+            // 计算每一个特征点对的视差
             for (int j = 0; j < int(corres.size()); j++)
             {
                 Vector2d pts_0(corres[j].first(0), corres[j].first(1));
@@ -506,7 +551,10 @@ bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
                 sum_parallax = sum_parallax + parallax;
 
             }
+            // 计算所有点对的平均视差
             average_parallax = 1.0 * sum_parallax / int(corres.size());
+            // 460可能是焦距， 乘 460 得到 像素误差
+            // 求解相机位姿，使用对极几何 使用八点法或者五点法，结合RANSAC来估计相对位姿，并剔除外点。
             if(average_parallax * 460 > 30 && m_estimator.solveRelativeRT(corres, relative_R, relative_T))
             {
                 l = i;

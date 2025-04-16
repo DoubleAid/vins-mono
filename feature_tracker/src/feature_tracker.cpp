@@ -108,7 +108,6 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     else
         img = _img;
 
-    // 我的推断
     // prev_img 是上一帧的图像
     // cur_img 是这一帧的图像
     // forw_img 是估计的下一帧的图像，也就是输入的帧

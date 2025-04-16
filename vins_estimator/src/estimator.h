@@ -42,8 +42,10 @@ class Estimator
     // internal
     // 重置系统状态（清除滑动窗口、预积分、特征跟踪等），用于系统重启或故障恢复。
     void clearState();
+    // 当窗口满的时候初始化
     bool initialStructure();
     bool visualInitialAlign();
+    // 根据参考帧计算出相对位姿（旋转和平移）。
     bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
     void slideWindow();
     void solveOdometry();

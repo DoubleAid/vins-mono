@@ -219,49 +219,70 @@ VectorXd FeatureManager::getDepthVector()
     return dep_vec;
 }
 
+// 通过多视图几何（线性三角化）估计特征点的深度，为后续优化提供初始值。
+// 滑动窗口内各帧的 IMU 位置（世界坐标系）。
+// 相机到 IMU 的平移外参。
+// 相机到 IMU 的旋转外参。
+
+// 具体参考 SVD
 void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
 {
+    // 遍历所有特征点​
     for (auto &it_per_id : feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
+        // 特征点需被至少 2 帧观测且起始帧不在滑动窗口末尾（保证足够视差）。
         if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
             continue;
-
+        // 已三角化的点跳过
         if (it_per_id.estimated_depth > 0)
             continue;
-        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+        
+        // 起始帧索引
+        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;   // 初始化为起始帧前一帧（后续会递增）
 
-        ROS_ASSERT(NUM_OF_CAM == 1);
-        Eigen::MatrixXd svd_A(2 * it_per_id.feature_per_frame.size(), 4);
-        int svd_idx = 0;
+        ROS_ASSERT(NUM_OF_CAM == 1);                            // 仅支持单目相机
+        Eigen::MatrixXd svd_A(2 * it_per_id.feature_per_frame.size(), 4);   // SVD矩阵
+        int svd_idx = 0;    // 矩阵行索引
 
         Eigen::Matrix<double, 3, 4> P0;
-        Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
-        Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
-        P0.leftCols<3>() = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];    // 相机位置（世界坐标系）
+        Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];                // 相机旋转（世界坐标系）
+        P0.leftCols<3>() = Eigen::Matrix3d::Identity();         // 局部坐标系下投影矩阵 [I | 0]
         P0.rightCols<1>() = Eigen::Vector3d::Zero();
 
+        // 遍历所有观测帧，构建线性方程组​
         for (auto &it_per_frame : it_per_id.feature_per_frame)
         {
-            imu_j++;
+            imu_j++;    // 跳过起始帧自身
 
+            // 计算当前帧的相机位姿（世界坐标系）
             Eigen::Vector3d t1 = Ps[imu_j] + Rs[imu_j] * tic[0];
             Eigen::Matrix3d R1 = Rs[imu_j] * ric[0];
+
+            // 转换到第一个观测帧的坐标系
             Eigen::Vector3d t = R0.transpose() * (t1 - t0);
             Eigen::Matrix3d R = R0.transpose() * R1;
+
+            // 构建投影矩阵 P = [R^T | -R^T t]
             Eigen::Matrix<double, 3, 4> P;
             P.leftCols<3>() = R.transpose();
             P.rightCols<1>() = -R.transpose() * t;
+
+            // 归一化特征点坐标
             Eigen::Vector3d f = it_per_frame.point.normalized();
+            // 构建线性方程：u*P.row(2) - P.row(0) = 0 和 v*P.row(2) - P.row(1) = 0
             svd_A.row(svd_idx++) = f[0] * P.row(2) - f[2] * P.row(0);
             svd_A.row(svd_idx++) = f[1] * P.row(2) - f[2] * P.row(1);
 
             if (imu_i == imu_j)
                 continue;
         }
+
+        // 求解SVD得到深度估计​
         ROS_ASSERT(svd_idx == svd_A.rows());
         Eigen::Vector4d svd_V = Eigen::JacobiSVD<Eigen::MatrixXd>(svd_A, Eigen::ComputeThinV).matrixV().rightCols<1>();
-        double svd_method = svd_V[2] / svd_V[3];
+        double svd_method = svd_V[2] / svd_V[3];    // 齐次坐标归一化
         //it_per_id->estimated_depth = -b / A;
         //it_per_id->estimated_depth = svd_V[2] / svd_V[3];
 
@@ -270,7 +291,7 @@ void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
 
         if (it_per_id.estimated_depth < 0.1)
         {
-            it_per_id.estimated_depth = INIT_DEPTH;
+            it_per_id.estimated_depth = INIT_DEPTH; // 异常值处理
         }
 
     }

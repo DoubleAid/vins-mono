@@ -66,6 +66,8 @@ CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 Eigen::Vector3d last_t(-100, -100, -100);
 double last_image_time = -1;
 
+// 变量用于 ​​跟踪系统处理的独立数据序列数量​​，例如多次运行不同数据集或分段处理多个场景。
+​// ​限制最多处理 5 个序列​​ 是开发者设定的临时约束，防止资源耗尽或代码逻辑错误。
 void new_sequence()
 {
     printf("new sequence\n");
@@ -76,7 +78,9 @@ void new_sequence()
         ROS_WARN("only support 5 sequences since it's boring to copy code for more sequences.");
         ROS_BREAK();
     }
+    // 重置位姿图可视化
     posegraph.posegraph_visualization->reset();
+    // 发布空数据（确保可视化更新）
     posegraph.publish();
     m_buf.lock();
     while(!image_buf.empty())
@@ -93,6 +97,7 @@ void new_sequence()
 void image_callback(const sensor_msgs::ImageConstPtr &image_msg)
 {
     //ROS_INFO("image_callback!");
+    // 如果没有回环检测
     if(!LOOP_CLOSURE)
         return;
     m_buf.lock();
@@ -105,6 +110,7 @@ void image_callback(const sensor_msgs::ImageConstPtr &image_msg)
         last_image_time = image_msg->header.stamp.toSec();
     else if (image_msg->header.stamp.toSec() - last_image_time > 1.0 || image_msg->header.stamp.toSec() < last_image_time)
     {
+        // 检测到图片的顺序不稳定，则重新初始化
         ROS_WARN("image discontinue! detect a new sequence!");
         new_sequence();
     }
@@ -150,6 +156,7 @@ void pose_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     */
 }
 
+// 
 void imu_forward_callback(const nav_msgs::Odometry::ConstPtr &forward_msg)
 {
     if (VISUALIZE_IMU_FORWARD)
@@ -291,8 +298,11 @@ void extrinsic_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     m_process.unlock();
 }
 
+// 位姿图优化的核心处理线程，主要负责 ​​关键帧管理​​、​​数据同步​​ 和 ​​回环检测触发​​。
+// 其核心任务是将 VIO 输出的关键帧数据整合到位姿图中，并为回环检测提供输入。
 void process()
 {
+    // 如果不进行回环检测，就放弃
     if (!LOOP_CLOSURE)
         return;
     while (true)
@@ -305,28 +315,34 @@ void process()
         m_buf.lock();
         if(!image_buf.empty() && !point_buf.empty() && !pose_buf.empty())
         {
+            // 移除 时间落后的数据
+            // 要求位姿数据大于图片数据
             if (image_buf.front()->header.stamp.toSec() > pose_buf.front()->header.stamp.toSec())
             {
                 pose_buf.pop();
                 printf("throw pose at beginning\n");
             }
+            // 特征点数据大于 图片数据
             else if (image_buf.front()->header.stamp.toSec() > point_buf.front()->header.stamp.toSec())
             {
                 point_buf.pop();
                 printf("throw point at beginning\n");
             }
+            // 图片 > 位姿 且 特征点 > 位姿
             else if (image_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec() 
                 && point_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec())
             {
+                // 先拿取 位姿 数据
                 pose_msg = pose_buf.front();
                 pose_buf.pop();
                 while (!pose_buf.empty())
                     pose_buf.pop();
+                // 将所有落后的图片都删除
                 while (image_buf.front()->header.stamp.toSec() < pose_msg->header.stamp.toSec())
                     image_buf.pop();
                 image_msg = image_buf.front();
                 image_buf.pop();
-
+                // 将所有落后的特征点数据删除
                 while (point_buf.front()->header.stamp.toSec() < pose_msg->header.stamp.toSec())
                     point_buf.pop();
                 point_msg = point_buf.front();
@@ -334,19 +350,21 @@ void process()
             }
         }
         m_buf.unlock();
-
+        // 如果 位姿信息 不为空
         if (pose_msg != NULL)
         {
             //printf(" pose time %f \n", pose_msg->header.stamp.toSec());
             //printf(" point time %f \n", point_msg->header.stamp.toSec());
             //printf(" image time %f \n", image_msg->header.stamp.toSec());
             // skip fisrt few
+            // 跳过刚开始初始化时不稳定的关键帧
             if (skip_first_cnt < SKIP_FIRST_CNT)
             {
                 skip_first_cnt++;
                 continue;
             }
 
+            // 处理完一个帧之后，跳过后续的几帧，避免出现频繁的处理
             if (skip_cnt < SKIP_CNT)
             {
                 skip_cnt++;
@@ -357,6 +375,7 @@ void process()
                 skip_cnt = 0;
             }
 
+            // 转换图像消息为OpenCV格式，处理可能的编码问题。
             cv_bridge::CvImageConstPtr ptr;
             if (image_msg->encoding == "8UC1")
             {
@@ -373,8 +392,10 @@ void process()
             else
                 ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::MONO8);
             
+            // 从pose_msg中提取位姿的平移T和旋转R。
             cv::Mat image = ptr->image;
             // build keyframe
+            // T 是关键帧的位姿
             Vector3d T = Vector3d(pose_msg->pose.pose.position.x,
                                   pose_msg->pose.pose.position.y,
                                   pose_msg->pose.pose.position.z);
@@ -382,8 +403,11 @@ void process()
                                      pose_msg->pose.pose.orientation.x,
                                      pose_msg->pose.pose.orientation.y,
                                      pose_msg->pose.pose.orientation.z).toRotationMatrix();
+            
+            // 如果当前帧与上一帧的平移距离超过SKIP_DIS阈值，则创建关键帧。
             if((T - last_t).norm() > SKIP_DIS)
             {
+                // 构建关键帧数据，包括3D点、2D像素坐标、归一化坐标、特征点ID等。
                 vector<cv::Point3f> point_3d; 
                 vector<cv::Point2f> point_2d_uv; 
                 vector<cv::Point2f> point_2d_normal;
@@ -415,6 +439,7 @@ void process()
                                    point_3d, point_2d_uv, point_2d_normal, point_id, sequence);   
                 m_process.lock();
                 start_flag = 1;
+                // 加锁处理全局数据，将关键帧添加到位姿图中，并可能触发回环检测。
                 posegraph.addKeyFrame(keyframe, 1);
                 m_process.unlock();
                 frame_index++;
@@ -427,13 +452,16 @@ void process()
     }
 }
 
+// command 线程 用于​​监听用户键盘输入​​，并根据输入执行特定操作，增强系统的 ​​交互性​​ 和 ​​调试能力​​。
 void command()
 {
+    // 如果不进行回环检测就返回
     if (!LOOP_CLOSURE)
         return;
     while(1)
     {
         char c = getchar();
+        // 如果是 s 就保存位姿图
         if (c == 's')
         {
             m_process.lock();
@@ -443,6 +471,7 @@ void command()
             // printf("program shutting down...\n");
             // ros::shutdown();
         }
+        // 重置系统状态，开始新一段数据记录
         if (c == 'n')
             new_sequence();
 
@@ -455,13 +484,15 @@ int main(int argc, char **argv)
 {
     ros::init(argc, argv, "pose_graph");
     ros::NodeHandle n("~");
-    posegraph.registerPub(n);
+    posegraph.registerPub(n);       // 注册位姿图的发布器
 
     // read param
+    // 读取可视化参数
     n.getParam("visualization_shift_x", VISUALIZATION_SHIFT_X);
     n.getParam("visualization_shift_y", VISUALIZATION_SHIFT_Y);
     n.getParam("skip_cnt", SKIP_CNT);
     n.getParam("skip_dis", SKIP_DIS);
+    // 读取配置文件路径
     std::string config_file;
     n.getParam("config_file", config_file);
     cv::FileStorage fsSettings(config_file, cv::FileStorage::READ);
@@ -474,7 +505,7 @@ int main(int argc, char **argv)
     cameraposevisual.setScale(camera_visual_size);
     cameraposevisual.setLineWidth(camera_visual_size / 10.0);
 
-
+    // 是否启用回环检测
     LOOP_CLOSURE = fsSettings["loop_closure"];
     std::string IMAGE_TOPIC;
     int LOAD_PREVIOUS_POSE_GRAPH;
@@ -483,20 +514,25 @@ int main(int argc, char **argv)
         ROW = fsSettings["image_height"];
         COL = fsSettings["image_width"];
         std::string pkg_path = ros::package::getPath("pose_graph");
+        // 加载BRIEF描述子词汇表（用于特征匹配）
         string vocabulary_file = pkg_path + "/../support_files/brief_k10L6.bin";
         cout << "vocabulary_file" << vocabulary_file << endl;
         posegraph.loadVocabulary(vocabulary_file);
 
+        // 加载BRIEF描述子模式文件
         BRIEF_PATTERN_FILE = pkg_path + "/../support_files/brief_pattern.yml";
         cout << "BRIEF_PATTERN_FILE" << BRIEF_PATTERN_FILE << endl;
+        // 初始化相机模型
         m_camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(config_file.c_str());
 
+        // 读取图像话题名称和保存路径
         fsSettings["image_topic"] >> IMAGE_TOPIC;        
         fsSettings["pose_graph_save_path"] >> POSE_GRAPH_SAVE_PATH;
         fsSettings["output_path"] >> VINS_RESULT_PATH;
         fsSettings["save_image"] >> DEBUG_IMAGE;
 
         // create folder if not exists
+        // 创建保存目录
         FileSystemHelper::createDirectoryIfNotExists(POSE_GRAPH_SAVE_PATH.c_str());
         FileSystemHelper::createDirectoryIfNotExists(VINS_RESULT_PATH.c_str());
 

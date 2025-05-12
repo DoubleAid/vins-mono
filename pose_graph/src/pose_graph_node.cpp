@@ -66,8 +66,8 @@ CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 Eigen::Vector3d last_t(-100, -100, -100);
 double last_image_time = -1;
 
-// 变量用于 ​​跟踪系统处理的独立数据序列数量​​，例如多次运行不同数据集或分段处理多个场景。
-​// ​限制最多处理 5 个序列​​ 是开发者设定的临时约束，防止资源耗尽或代码逻辑错误。
+// 变量用于 ​​跟踪系统处理的独立数据序列数量​​，例如多次运行不同数据集或分段处理多个场景
+// ​限制最多处理 5 个序列​​ 是开发者设定的临时约束，防止资源耗尽或代码逻辑错误。
 void new_sequence()
 {
     printf("new sequence\n");
@@ -313,6 +313,7 @@ void process()
 
         // find out the messages with same time stamp
         m_buf.lock();
+        // 对齐 图片 位姿 和 关键帧特征点数据
         if(!image_buf.empty() && !point_buf.empty() && !pose_buf.empty())
         {
             // 移除 时间落后的数据
@@ -434,7 +435,7 @@ void process()
 
                     //printf("u %f, v %f \n", p_2d_uv.x, p_2d_uv.y);
                 }
-
+                // 创建一个关键帧，包含 位姿时间戳，位姿矩阵，图像数据，3D点，2D像素坐标，归一化坐标，特征点ID等信息。
                 KeyFrame* keyframe = new KeyFrame(pose_msg->header.stamp.toSec(), frame_index, T, R, image,
                                    point_3d, point_2d_uv, point_2d_normal, point_id, sequence);   
                 m_process.lock();
@@ -544,6 +545,7 @@ int main(int argc, char **argv)
         fout.close();
         fsSettings.release();
 
+        // 如果设置是加载之前的位姿图，则加载
         if (LOAD_PREVIOUS_POSE_GRAPH)
         {
             printf("load pose graph\n");

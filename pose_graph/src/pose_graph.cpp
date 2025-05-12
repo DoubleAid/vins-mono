@@ -39,11 +39,16 @@ void PoseGraph::loadVocabulary(std::string voc_path)
     db.setVocabulary(*voc, false, 0);
 }
 
+// 处理前端新增关键帧，包括 ​​多序列对齐​​、​​坐标系漂移校正​​、​​回环检测触发​​，并将关键帧加入位姿图。
+// cur_kf​​：前端传入的关键帧对象，包含VIO位姿、特征点、图像等数据。
+// flag_detect_loop​​：是否触发回环检测。
 void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
 {
     //shift to base frame
     Vector3d vio_P_cur;
     Matrix3d vio_R_cur;
+    // 处理多序列初始化​
+    // 当检测到新序列（如重启或切换场景）时，重置漂移参数，确保各序列独立对齐。
     if (sequence_cnt != cur_kf->sequence)
     {
         sequence_cnt++;
@@ -56,29 +61,44 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
         m_drift.unlock();
     }
 
+    // 获取VIO原始位姿
     cur_kf->getVioPose(vio_P_cur, vio_R_cur);
+    // 应用全局漂移校正
     vio_P_cur = w_r_vio * vio_P_cur + w_t_vio;
     vio_R_cur = w_r_vio *  vio_R_cur;
+    // 更新关键帧位姿
     cur_kf->updateVioPose(vio_P_cur, vio_R_cur);
+
+    // 为每个关键帧分配唯一ID，便于后续检索和优化。
+    // 分配全局唯一索引
     cur_kf->index = global_index;
-    global_index++;
+    global_index++; // 全局索引递增
+
+    // 回环检测触发​
 	int loop_index = -1;
     if (flag_detect_loop)
     {
         TicToc tmp_t;
+        // 执行回环检测
         loop_index = detectLoop(cur_kf, cur_kf->index);
     }
     else
     {
+        // 仅添加关键帧到词袋
         addKeyFrameIntoVoc(cur_kf);
     }
+
+    // 如果找到了回环
 	if (loop_index != -1)
 	{
         //printf(" %d detect loop with %d \n", cur_kf->index, loop_index);
+        // 获取回环关键帧
         KeyFrame* old_kf = getKeyFrame(loop_index);
 
+        // 建立共视连接
         if (cur_kf->findConnection(old_kf))
         {
+            // 更新最早回环索引
             if (earliest_loop_index > loop_index || earliest_loop_index == -1)
                 earliest_loop_index = loop_index;
 
@@ -89,25 +109,32 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
 
             Vector3d relative_t;
             Quaterniond relative_q;
+            // 计算相对位姿变换
             relative_t = cur_kf->getLoopRelativeT();
             relative_q = (cur_kf->getLoopRelativeQ()).toRotationMatrix();
+            // 计算出当前关键帧的位姿变换
             w_P_cur = w_R_old * relative_t + w_P_old;
             w_R_cur = w_R_old * relative_q;
             double shift_yaw;
             Matrix3d shift_r;
             Vector3d shift_t;
+            // 计算当前帧修正后的位姿变换和 vio 输入的位姿变换发生的漂移
             shift_yaw = Utility::R2ypr(w_R_cur).x() - Utility::R2ypr(vio_R_cur).x();
             shift_r = Utility::ypr2R(Vector3d(shift_yaw, 0, 0));
             shift_t = w_P_cur - w_R_cur * vio_R_cur.transpose() * vio_P_cur;
+            
             // shift vio pose of whole sequence to the world frame
+            // 对齐不同序列的坐标系，如果对应两个关键帧的序列不一样，需要对齐
             if (old_kf->sequence != cur_kf->sequence && sequence_loop[cur_kf->sequence] == 0)
             {
                 w_r_vio = shift_r;
                 w_t_vio = shift_t;
+                // 修订当前位置，根据之前计算出来的漂移，对 vio 位姿做修正
                 vio_P_cur = w_r_vio * vio_P_cur + w_t_vio;
                 vio_R_cur = w_r_vio *  vio_R_cur;
                 cur_kf->updateVioPose(vio_P_cur, vio_R_cur);
                 list<KeyFrame*>::iterator it = keyframelist.begin();
+                // 校正当前序列所有关键帧的位姿
                 for (; it != keyframelist.end(); it++)
                 {
                     if((*it)->sequence == cur_kf->sequence)
@@ -120,24 +147,32 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
                         (*it)->updateVioPose(vio_P_cur, vio_R_cur);
                     }
                 }
+                // 标记已对齐
                 sequence_loop[cur_kf->sequence] = 1;
             }
             m_optimize_buf.lock();
-            optimize_buf.push(cur_kf->index);
+            optimize_buf.push(cur_kf->index);       // 将当前帧加入优化队列
             m_optimize_buf.unlock();
         }
 	}
+
+    // 更新关键帧位姿并发布​
 	m_keyframelist.lock();
     Vector3d P;
     Matrix3d R;
+    // 应用当前漂移校正
     cur_kf->getVioPose(P, R);
     P = r_drift * P + t_drift;
     R = r_drift * R;
+    // 更新优化后位姿
     cur_kf->updatePose(P, R);
+
+    // 可视化处理
     Quaterniond Q{R};
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = ros::Time(cur_kf->time_stamp);
     pose_stamped.header.frame_id = "world";
+    // 填充位姿信息
     pose_stamped.pose.position.x = P.x() + VISUALIZATION_SHIFT_X;
     pose_stamped.pose.position.y = P.y() + VISUALIZATION_SHIFT_Y;
     pose_stamped.pose.position.z = P.z();
@@ -145,11 +180,14 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     pose_stamped.pose.orientation.y = Q.y();
     pose_stamped.pose.orientation.z = Q.z();
     pose_stamped.pose.orientation.w = Q.w();
+    // 加入路径
     path[sequence_cnt].poses.push_back(pose_stamped);
     path[sequence_cnt].header = pose_stamped.header;
 
+    // 保存结果到文件（可选）
     if (SAVE_LOOP_PATH)
     {
+        // 写入文件
         ofstream loop_path_file(VINS_RESULT_PATH, ios::app);
         loop_path_file.setf(ios::fixed, ios::floatfield);
         loop_path_file.precision(0);
@@ -166,8 +204,10 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
         loop_path_file.close();
     }
     //draw local connection
+    // 添加可视化边（局部连接和回环边）
     if (SHOW_S_EDGE)
     {
+        // 绘制局部连接边
         list<KeyFrame*>::reverse_iterator rit = keyframelist.rbegin();
         for (int i = 0; i < 4; i++)
         {
@@ -185,6 +225,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     }
     if (SHOW_L_EDGE)
     {
+        // 绘制回环边
         if (cur_kf->has_loop)
         {
             //printf("has loop \n");
@@ -204,8 +245,8 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     }
     //posegraph_visualization->add_pose(P + Vector3d(VISUALIZATION_SHIFT_X, VISUALIZATION_SHIFT_Y, 0), Q);
 
-	keyframelist.push_back(cur_kf);
-    publish();
+	keyframelist.push_back(cur_kf); // 加入关键帧列表
+    publish();                      // 发布消息
 	m_keyframelist.unlock();
 }
 
@@ -301,9 +342,13 @@ KeyFrame* PoseGraph::getKeyFrame(int index)
         return NULL;
 }
 
+// 目标​​：检测当前关键帧是否与历史关键帧形成回环。
+// 输入​​：当前关键帧（keyframe）及其索引（frame_index）。
+// 输出​​：若检测到回环，返回最早匹配的历史关键帧索引；否则返回 -1。
 int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
 {
     // put image into image_pool; for visualization
+    // 为可视化准备图像，若开启调试模式（DEBUG_IMAGE），将当前帧图像缩放并存储到 image_pool。
     cv::Mat compressed_image;
     if (DEBUG_IMAGE)
     {
@@ -312,29 +357,38 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
         putText(compressed_image, "feature_num:" + to_string(feature_num), cv::Point2f(10, 10), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255));
         image_pool[frame_index] = compressed_image;
     }
+
     TicToc tmp_t;
     //first query; then add this frame into database!
-    QueryResults ret;
+    // 查询回环候选​
+    QueryResults ret;   // 存储查询结果（匹配的关键帧及分数）
     TicToc t_query;
+    // 从数据库中查询与当前帧描述子相似的历史关键帧。
+    // 当前关键帧的 BRIEF 描述子，输出匹配结果（按分数排序）。
+    // 最多返回 4 个候选。排除最近 50 帧（避免检测到临近帧）。
     db.query(keyframe->brief_descriptors, ret, 4, frame_index - 50);
     //printf("query time: %f", t_query.toc());
     //cout << "Searching for Image " << frame_index << ". " << ret << endl;
 
     TicToc t_add;
+    // 将当前帧描述子加入数据库，供后续查询使用。
     db.add(keyframe->brief_descriptors);
-    //printf("add feature time: %f", t_add.toc());
+    // printf("add feature time: %f", t_add.toc());
     // ret[0] is the nearest neighbour's score. threshold change with neighour score
     bool find_loop = false;
     cv::Mat loop_result;
+    // 在调试模式下，显示当前帧与匹配候选的对比图像。
     if (DEBUG_IMAGE)
     {
         loop_result = compressed_image.clone();
+        // 在图像上标注最高分
         if (ret.size() > 0)
             putText(loop_result, "neighbour score:" + to_string(ret[0].Score), cv::Point2f(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255));
     }
     // visual loop result
     if (DEBUG_IMAGE)
     {
+        // 水平拼接所有候选图像
         for (unsigned int i = 0; i < ret.size(); i++)
         {
             int tmp_index = ret[i].Id;
@@ -345,10 +399,12 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
         }
     }
     // a good match with its nerghbour
+    // 最高分阈值​​：ret[0].Score > 0.05，确保至少有一个强匹配。
     if (ret.size() >= 1 &&ret[0].Score > 0.05)
         for (unsigned int i = 1; i < ret.size(); i++)
         {
             //if (ret[i].Score > ret[0].Score * 0.3)
+            // ​​次高分阈值​​：ret[i].Score > 0.015，避免单次误检。排除低质量匹配，提高回环检测的鲁棒性。
             if (ret[i].Score > 0.015)
             {
                 find_loop = true;
@@ -370,13 +426,15 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
         cv::waitKey(20);
     }
 */
-    if (find_loop && frame_index > 50)
+    // 返回最早回环帧索引​
+    // 返回最早满足条件的历史关键帧索引，确保回环的全局一致性。
+    if (find_loop && frame_index > 50)  // 忽略前50帧 避免检测到近期帧。
     {
         int min_index = -1;
         for (unsigned int i = 0; i < ret.size(); i++)
         {
             if (min_index == -1 || (ret[i].Id < min_index && ret[i].Score > 0.015))
-                min_index = ret[i].Id;
+                min_index = ret[i].Id;  // 选择索引最小的候选（最早帧）
         }
         return min_index;
     }
@@ -400,66 +458,76 @@ void PoseGraph::addKeyFrameIntoVoc(KeyFrame* keyframe)
     db.add(keyframe->brief_descriptors);
 }
 
+// 在检测到回环后，执行 ​​4自由度位姿图优化​​（平移 x, y, z 和偏航角 yaw），修正累积漂移，提升全局一致性。
 void PoseGraph::optimize4DoF()
 {
-    while(true)
+    while(true)     // 持续运行的独立线程
     {
         int cur_index = -1;
         int first_looped_index = -1;
-        m_optimize_buf.lock();
-        while(!optimize_buf.empty())
+        m_optimize_buf.lock();      // 加锁
+        // 从队列中取出待优化关键帧索引，确保线程安全。
+        while(!optimize_buf.empty())                    // 处理队列中所有待优化关键帧
         {
-            cur_index = optimize_buf.front();
-            first_looped_index = earliest_loop_index;
+            cur_index = optimize_buf.front();           // 当前待优化的关键帧索引
+            first_looped_index = earliest_loop_index;   // 最早回环帧索引
             optimize_buf.pop();
         }
         m_optimize_buf.unlock();
+        // 初始化优化问题​
         if (cur_index != -1)
         {
             printf("optimize pose graph \n");
             TicToc tmp_t;
             m_keyframelist.lock();
-            KeyFrame* cur_kf = getKeyFrame(cur_index);
+            KeyFrame* cur_kf = getKeyFrame(cur_index);  // 获取当前关键帧对象
 
-            int max_length = cur_index + 1;
+            int max_length = cur_index + 1;             // 最大优化范围（从最早回环到当前帧）
 
             // w^t_i   w^q_i
-            double t_array[max_length][3];
-            Quaterniond q_array[max_length];
-            double euler_array[max_length][3];
-            double sequence_array[max_length];
+            // 定义存储变量
+            double t_array[max_length][3];              // 平移 (x, y, z)
+            Quaterniond q_array[max_length];            // 旋转（四元数）
+            double euler_array[max_length][3];          // 欧拉角 (yaw, pitch, roll)
+            double sequence_array[max_length];          // 序列ID（多地图支持）
 
+            // Ceres 问题配置
             ceres::Problem problem;
             ceres::Solver::Options options;
-            options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+            options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;     // 稀疏Cholesky分解
             //options.minimizer_progress_to_stdout = true;
             //options.max_solver_time_in_seconds = SOLVER_TIME * 3;
-            options.max_num_iterations = 5;
+            options.max_num_iterations = 5;                                 // 限制迭代次数
             ceres::Solver::Summary summary;
             ceres::LossFunction *loss_function;
-            loss_function = new ceres::HuberLoss(0.1);
+            loss_function = new ceres::HuberLoss(0.1);                      // Huber鲁棒核
             //loss_function = new ceres::CauchyLoss(1.0);
             ceres::LocalParameterization* angle_local_parameterization =
-                AngleLocalParameterization::Create();
+                AngleLocalParameterization::Create();                       // 角度参数化（仅优化yaw）
 
             list<KeyFrame*>::iterator it;
 
             int i = 0;
+            // 遍历关键帧并添加参数块​
             for (it = keyframelist.begin(); it != keyframelist.end(); it++)
             {
+                // 跳过早于最早回环的帧
                 if ((*it)->index < first_looped_index)
                     continue;
-                (*it)->local_index = i;
+                (*it)->local_index = i;     // 设置局部索引
                 Quaterniond tmp_q;
                 Matrix3d tmp_r;
                 Vector3d tmp_t;
+                // // 从VIO获取初始位姿（可能带漂移）
                 (*it)->getVioPose(tmp_t, tmp_r);
                 tmp_q = tmp_r;
+                // 存储到数组
                 t_array[i][0] = tmp_t(0);
                 t_array[i][1] = tmp_t(1);
                 t_array[i][2] = tmp_t(2);
                 q_array[i] = tmp_q;
 
+                // 将旋转矩阵转化成欧拉角
                 Vector3d euler_angle = Utility::R2ypr(tmp_q.toRotationMatrix());
                 euler_array[i][0] = euler_angle.x();
                 euler_array[i][1] = euler_angle.y();
@@ -467,9 +535,12 @@ void PoseGraph::optimize4DoF()
 
                 sequence_array[i] = (*it)->sequence;
 
+                // 添加参数块（仅优化yaw）
                 problem.AddParameterBlock(euler_array[i], 1, angle_local_parameterization);
+                // 平移全优化
                 problem.AddParameterBlock(t_array[i], 3);
 
+                // 固定第一个回环帧和基础序列的位姿
                 if ((*it)->index == first_looped_index || (*it)->sequence == 0)
                 {
                     problem.SetParameterBlockConstant(euler_array[i]);
@@ -477,6 +548,8 @@ void PoseGraph::optimize4DoF()
                 }
 
                 //add edge
+                // 添加相邻帧约束（局部连续性）​
+                // 约束相邻帧的相对平移和 yaw，保持局部一致性。
                 for (int j = 1; j < 5; j++)
                 {
                   if (i - j >= 0 && sequence_array[i] == sequence_array[i-j])
@@ -495,7 +568,8 @@ void PoseGraph::optimize4DoF()
                 }
 
                 //add loop edge
-
+                // 添加回环检测到的4自由度约束
+                // 回环约束的权重更高，优先修正全局漂移。
                 if((*it)->has_loop)
                 {
                     assert((*it)->loop_index >= first_looped_index);
@@ -518,7 +592,7 @@ void PoseGraph::optimize4DoF()
                 i++;
             }
             m_keyframelist.unlock();
-
+            // // 求解优化
             ceres::Solve(options, &problem, &summary);
             //std::cout << summary.BriefReport() << "\n";
 
@@ -536,30 +610,33 @@ void PoseGraph::optimize4DoF()
                 if ((*it)->index < first_looped_index)
                     continue;
                 Quaterniond tmp_q;
+                // 从优化结果中读取位姿
                 tmp_q = Utility::ypr2R(Vector3d(euler_array[i][0], euler_array[i][1], euler_array[i][2]));
                 Vector3d tmp_t = Vector3d(t_array[i][0], t_array[i][1], t_array[i][2]);
                 Matrix3d tmp_r = tmp_q.toRotationMatrix();
-                (*it)-> updatePose(tmp_t, tmp_r);
+                (*it)-> updatePose(tmp_t, tmp_r);           // 更新关键帧位姿
 
                 if ((*it)->index == cur_index)
                     break;
                 i++;
             }
 
+            // 计算漂移量（用于后续未优化的关键帧）
             Vector3d cur_t, vio_t;
             Matrix3d cur_r, vio_r;
-            cur_kf->getPose(cur_t, cur_r);
-            cur_kf->getVioPose(vio_t, vio_r);
+            cur_kf->getPose(cur_t, cur_r);      // 优化后的位姿
+            cur_kf->getVioPose(vio_t, vio_r);   // VIO原始位姿
             m_drift.lock();
-            yaw_drift = Utility::R2ypr(cur_r).x() - Utility::R2ypr(vio_r).x();
-            r_drift = Utility::ypr2R(Vector3d(yaw_drift, 0, 0));
-            t_drift = cur_t - r_drift * vio_t;
+            yaw_drift = Utility::R2ypr(cur_r).x() - Utility::R2ypr(vio_r).x();  // yaw漂移
+            r_drift = Utility::ypr2R(Vector3d(yaw_drift, 0, 0));                // 旋转漂移矩阵
+            t_drift = cur_t - r_drift * vio_t;                                  // 平移漂移
             m_drift.unlock();
             //cout << "t_drift " << t_drift.transpose() << endl;
             //cout << "r_drift " << Utility::R2ypr(r_drift).transpose() << endl;
             //cout << "yaw drift " << yaw_drift << endl;
 
             it++;
+            // 应用漂移校正到后续关键帧
             for (; it != keyframelist.end(); it++)
             {
                 Vector3d P;
@@ -570,7 +647,7 @@ void PoseGraph::optimize4DoF()
                 (*it)->updatePose(P, R);
             }
             m_keyframelist.unlock();
-            updatePath();
+            updatePath();               // 更新可视化路径
         }
 
         std::chrono::milliseconds dura(2000);

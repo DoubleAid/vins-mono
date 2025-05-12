@@ -2,6 +2,7 @@
 
 int FeatureTracker::n_id = 0;
 
+// 判断一个光流点是不是在图像边界，过滤位于图像边缘的特征点，避免越界访问
 bool inBorder(const cv::Point2f &pt)
 {
     const int BORDER_SIZE = 1;
@@ -34,9 +35,9 @@ FeatureTracker::FeatureTracker()
 }
 
 // 创建掩码 mask，避免在已有特征点附近检测新点。
-// 全白掩码（普通相机）或鱼眼掩码。
-​// ​动态更新​​：每保留一个特征点，就在掩码上标记其周围 MIN_DIST 区域为禁止（0），确保后续检测的新点不会与已有点过于接近。
-​// ​效果​​：特征点均匀分布，避免密集区域重复检测。
+// 全白掩码（普通相机）或鱼眼掩码
+// ​动态更新​​：每保留一个特征点，就在掩码上标记其周围 MIN_DIST 区域为禁止（0），确保后续检测的新点不会与已有点过于接近。
+// ​效果​​：特征点均匀分布，避免密集区域重复检测。
 void FeatureTracker::setMask()
 {
     // 使用预定义的鱼眼相机掩码
@@ -53,7 +54,6 @@ void FeatureTracker::setMask()
     for (unsigned int i = 0; i < forw_pts.size(); i++)
         // 将跟踪次数、当前帧坐标、ID 打包存入列表
         cnt_pts_id.push_back(make_pair(track_cnt[i], make_pair(forw_pts[i], ids[i])));
-
     // 按跟踪次数从高到低排序
     sort(cnt_pts_id.begin(), cnt_pts_id.end(), [](const pair<int, pair<cv::Point2f, int>> &a, const pair<int, pair<cv::Point2f, int>> &b)
          {
@@ -109,9 +109,9 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         img = _img;
 
     // prev_img 是上一帧的图像
-    // cur_img 是这一帧的图像
-    // forw_img 是估计的下一帧的图像，也就是输入的帧
-    if (forw_img.empty())
+    // cur_img 是前一帧的图像
+    // forw_img 是需要估计的当前帧的图像，也就是输入的帧
+    if (forw_img.empty())           // 如果上一个输入的帧是空的，也就是没有进行初始化，就先进行初始化
     {
         prev_img = cur_img = forw_img = img;
     }
@@ -262,7 +262,7 @@ void FeatureTracker::readIntrinsicParameter(const string &calib_file)
 }
 
 // ​​去畸变与归一化坐标转换​​：将当前帧的特征点从像素坐标系转换到归一化平面坐标系（z=1）。
-​// ​计算特征点速度​​：基于上一帧的归一化坐标和时间差，估计特征点的运动速度。
+// ​计算特征点速度​​：基于上一帧的归一化坐标和时间差，估计特征点的运动速度。
 void FeatureTracker::showUndistortion(const string &name)
 {
     cv::Mat undistortedImg(ROW + 600, COL + 600, CV_8UC1, cv::Scalar(0));
@@ -300,7 +300,7 @@ void FeatureTracker::showUndistortion(const string &name)
 }
 
 // ​​去畸变与归一化坐标转换​​：将当前帧的特征点从像素坐标系转换到归一化平面坐标系（z=1）。
-​// ​计算特征点速度​​：基于上一帧的归一化坐标和时间差，估计特征点的运动速度
+// ​计算特征点速度​​：基于上一帧的归一化坐标和时间差，估计特征点的运动速度
 void FeatureTracker::undistortedPoints()
 {
     // 清空当前帧归一化坐标列表

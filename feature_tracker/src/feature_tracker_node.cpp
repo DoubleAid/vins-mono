@@ -81,7 +81,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         img.header = img_msg->header;
         img.height = img_msg->height;
         img.width = img_msg->width;
-        img.is_bigendian = img_msg->is_bigendian;
+        img.is_bigendian = img_msg->is_bigendian;       // 是否为大端
         img.step = img_msg->step;
         img.data = img_msg->data;
         img.encoding = "mono8";
@@ -144,7 +144,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         sensor_msgs::ChannelFloat32 u_of_point;                 // 图片的横坐标
         sensor_msgs::ChannelFloat32 v_of_point;
         sensor_msgs::ChannelFloat32 velocity_x_of_point;        // 光流速度
-        sensor_msgs::ChannelFloat32 velocity_y_of_point;
+        sensor_msgs::ChannelFloat32 velocity_y_of_point; 
 
         feature_points->header = img_msg->header;
         feature_points->header.frame_id = "world";
@@ -157,6 +157,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
             auto &cur_pts = trackerData[i].cur_pts;
             auto &ids = trackerData[i].ids;
             auto &pts_velocity = trackerData[i].pts_velocity;
+            // 根据特征ID遍历当前的特征
             for (unsigned int j = 0; j < ids.size(); j++)
             {
                 if (trackerData[i].track_cnt[j] > 1)
@@ -164,19 +165,23 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
                     int p_id = ids[j];
                     hash_ids[i].insert(p_id);
                     geometry_msgs::Point32 p;
+                    // 求归一化坐标
                     p.x = un_pts[j].x;
                     p.y = un_pts[j].y;
                     p.z = 1;
 
                     feature_points->points.push_back(p);
                     id_of_point.values.push_back(p_id * NUM_OF_CAM + i);
+                    // 设置图片的中特征点的位置
                     u_of_point.values.push_back(cur_pts[j].x);
                     v_of_point.values.push_back(cur_pts[j].y);
+                    // 设置特征点的光流速度
                     velocity_x_of_point.values.push_back(pts_velocity[j].x);
                     velocity_y_of_point.values.push_back(pts_velocity[j].y);
                 }
             }
         }
+        // 构建特征点列表
         feature_points->channels.push_back(id_of_point);
         feature_points->channels.push_back(u_of_point);
         feature_points->channels.push_back(v_of_point);
@@ -184,6 +189,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         feature_points->channels.push_back(velocity_y_of_point);
         ROS_DEBUG("publish %f, at %f", feature_points->header.stamp.toSec(), ros::Time::now().toSec());
         // skip the first image; since no optical speed on frist image
+        // 如果是第一帧就跳过，因为第一帧没有光流速度
         if (!init_pub)
         {
             init_pub = 1;

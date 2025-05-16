@@ -302,7 +302,7 @@ void extrinsic_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 // 其核心任务是将 VIO 输出的关键帧数据整合到位姿图中，并为回环检测提供输入。
 void process()
 {
-    // 如果不进行回环检测，就放弃
+    // 如果不进行回环检测，就没有必要进行位姿图优化了，直接返回
     if (!LOOP_CLOSURE)
         return;
     while (true)
@@ -320,16 +320,18 @@ void process()
             // 要求位姿数据大于图片数据
             if (image_buf.front()->header.stamp.toSec() > pose_buf.front()->header.stamp.toSec())
             {
+                // 我们位姿图优化是以位姿为主要对象，如果当前的位姿已经没有图片了，就直接丢弃
                 pose_buf.pop();
                 printf("throw pose at beginning\n");
             }
             // 特征点数据大于 图片数据
             else if (image_buf.front()->header.stamp.toSec() > point_buf.front()->header.stamp.toSec())
             {
+                // 如果当前已经有了位姿数据，但是特征点数据没有图片数据，就直接丢弃
                 point_buf.pop();
                 printf("throw point at beginning\n");
             }
-            // 图片 > 位姿 且 特征点 > 位姿
+            // 图片 > 位姿 且 特征点 > 位姿， 可以判定，肯定有一个位姿对应着一个图像和一个特征点
             else if (image_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec() 
                 && point_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec())
             {
@@ -351,14 +353,14 @@ void process()
             }
         }
         m_buf.unlock();
-        // 如果 位姿信息 不为空
+        // 如果 刚刚拿到了 位姿信息 不为空
         if (pose_msg != NULL)
         {
             //printf(" pose time %f \n", pose_msg->header.stamp.toSec());
             //printf(" point time %f \n", point_msg->header.stamp.toSec());
             //printf(" image time %f \n", image_msg->header.stamp.toSec());
             // skip fisrt few
-            // 跳过刚开始初始化时不稳定的关键帧
+            // 跳过刚开始初始化时不稳定的关键帧，刚开始的初始帧为了快速初始化，关键帧之间的位姿跨度较小
             if (skip_first_cnt < SKIP_FIRST_CNT)
             {
                 skip_first_cnt++;
@@ -406,14 +408,16 @@ void process()
                                      pose_msg->pose.pose.orientation.z).toRotationMatrix();
             
             // 如果当前帧与上一帧的平移距离超过SKIP_DIS阈值，则创建关键帧。
+            // 也就说两者之间的距离够大
             if((T - last_t).norm() > SKIP_DIS)
             {
                 // 构建关键帧数据，包括3D点、2D像素坐标、归一化坐标、特征点ID等。
-                vector<cv::Point3f> point_3d; 
-                vector<cv::Point2f> point_2d_uv; 
+                vector<cv::Point3f> point_3d;
+                vector<cv::Point2f> point_2d_uv;
                 vector<cv::Point2f> point_2d_normal;
                 vector<double> point_id;
-
+                // point_msg 包含多个channel
+                // 每个channel 包含一个特征点的信息[x, y, z, x_norm, y_norm, x_uv, y_uv, id]
                 for (unsigned int i = 0; i < point_msg->points.size(); i++)
                 {
                     cv::Point3f p_3d;
@@ -432,8 +436,6 @@ void process()
                     point_2d_normal.push_back(p_2d_normal);
                     point_2d_uv.push_back(p_2d_uv);
                     point_id.push_back(p_id);
-
-                    //printf("u %f, v %f \n", p_2d_uv.x, p_2d_uv.y);
                 }
                 // 创建一个关键帧，包含 位姿时间戳，位姿矩阵，图像数据，3D点，2D像素坐标，归一化坐标，特征点ID等信息。
                 KeyFrame* keyframe = new KeyFrame(pose_msg->header.stamp.toSec(), frame_index, T, R, image,

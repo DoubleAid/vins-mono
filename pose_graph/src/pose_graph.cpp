@@ -52,6 +52,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     if (sequence_cnt != cur_kf->sequence)
     {
         sequence_cnt++;
+        // sequence_loop 是一个标定是否存在回环的标记列表
         sequence_loop.push_back(0);
         w_t_vio = Eigen::Vector3d(0, 0, 0);
         w_r_vio = Eigen::Matrix3d::Identity();
@@ -61,9 +62,9 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
         m_drift.unlock();
     }
 
-    // 获取VIO原始位姿
+    // 获取VIO原始位姿，也就是窗口优化的位姿
     cur_kf->getVioPose(vio_P_cur, vio_R_cur);
-    // 应用全局漂移校正
+    // 应用全局漂移校正，更新当前的位姿矩阵和旋转矩阵
     vio_P_cur = w_r_vio * vio_P_cur + w_t_vio;
     vio_R_cur = w_r_vio *  vio_R_cur;
     // 更新关键帧位姿
@@ -76,6 +77,7 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
 
     // 回环检测触发​
 	int loop_index = -1;
+    // flag_detect_loop 设置恒为1
     if (flag_detect_loop)
     {
         TicToc tmp_t;
@@ -400,6 +402,9 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
     }
     // a good match with its nerghbour
     // 最高分阈值​​：ret[0].Score > 0.05，确保至少有一个强匹配。
+    // score = 1 - 1/2 || A/||A|| - B/||B|| ||
+    // 当 两个词袋向量十分相似时，score 接近 1，反之接近 0。
+    // 0.05 时一个及其宽松的阈值，目的是为了排除查找到的其实完全不符和要求的帧。
     if (ret.size() >= 1 &&ret[0].Score > 0.05)
         for (unsigned int i = 1; i < ret.size(); i++)
         {

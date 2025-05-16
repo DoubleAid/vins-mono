@@ -35,8 +35,8 @@ using namespace DBoW2;
 class PoseGraph
 {
 public:
-	PoseGraph();					// 构造函数，初始化位姿图参数（如序列计数器、全局索引等）。
-	~PoseGraph();					// 析构函数，释放资源（如关键帧内存、可视化对象等）。
+	PoseGraph();							// 构造函数，初始化位姿图参数（如序列计数器、全局索引等）。
+	~PoseGraph();							// 析构函数，释放资源（如关键帧内存、可视化对象等）。
 	void registerPub(ros::NodeHandle &n);	// 注册 ROS 发布器（如路径、位姿图可视化话题）。
 	void addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop);		// 核心函数​​：将实时关键帧插入位姿图，若 flag_detect_loop 为 true，触发回环检测。
 	void loadKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop);		// 从文件加载历史关键帧到位姿图，用于重启后的状态恢复。
@@ -46,16 +46,15 @@ public:
 	nav_msgs::Path path[10];				// 存储各序列（最多10个）的优化后路径，用于 RViz 可视化。
 	nav_msgs::Path base_path;				// 基础序列（通常是第一个序列）的路径，用于多地图对齐。
 	CameraPoseVisualization* posegraph_visualization;		// 可视化对象，管理相机位姿和回环连接的显示。
-	void savePoseGraph();		// 将当前位姿图数据（关键帧位姿、回环约束）保存到磁盘。
-	void loadPoseGraph();		// 从磁盘加载历史位姿图数据，恢复系统状态。
-	void publish();				// 发布路径、关键帧位姿等可视化信息到 ROS 话题。
-	Vector3d t_drift;			// 平移漂移量，用于多序列间的坐标系对齐。
-	double yaw_drift;			// 偏航角漂移量，修正方向误差。
-	Matrix3d r_drift;			// 旋转漂移矩阵，与 t_drift 共同描述序列间的变换。
+	void savePoseGraph();					// 将当前位姿图数据（关键帧位姿、回环约束）保存到磁盘。
+	void loadPoseGraph();					// 从磁盘加载历史位姿图数据，恢复系统状态。
+	void publish();							// 发布路径、关键帧位姿等可视化信息到 ROS 话题。
+	Vector3d t_drift;						// 平移漂移量，用于多序列间的坐标系对齐。
+	double yaw_drift;						// 偏航角漂移量，修正方向误差。
+	Matrix3d r_drift;						// 旋转漂移矩阵，与 t_drift 共同描述序列间的变换。
 	// world frame( base sequence or first sequence)<----> cur sequence frame  
-	Vector3d w_t_vio;			// 世界坐标系到 VIO 估计的平移偏移（用于多地图融合）。
-	Matrix3d w_r_vio;			// 世界坐标系到 VIO 估计的旋转偏移。
-
+	Vector3d w_t_vio;						// 世界坐标系到 VIO 估计的平移偏移（用于多地图融合）。
+	Matrix3d w_r_vio;						// 世界坐标系到 VIO 估计的旋转偏移。
 
 private:
 	int detectLoop(KeyFrame* keyframe, int frame_index);

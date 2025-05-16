@@ -41,4 +41,10 @@ catkin_make
 
 # 运行
 source devel/setup.bash
+
+# 进入 build 目录
+
+roslaunch vins_estimator euroc.launch 
+roslaunch vins_estimator vins_rviz.launch
+rosbag play YOUR_PATH_TO_DATASET/MH_01_easy.bag 
 ```
